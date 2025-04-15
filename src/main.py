@@ -9,15 +9,14 @@ from math import *
 # LangChain imports
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS, Pinecone
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.chat_models import ChatOpenAI
+from langchain_community.vectorstores import FAISS, Pinecone
+from langchain_openai import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain.chains import RetrievalQA
 from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import DocumentCompressorPipeline
 from langchain.retrievers.document_compressors import EmbeddingsFilter
-from langchain.callbacks.manager import CallbackManager
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 
 # Pinecone
@@ -431,29 +430,31 @@ def setup_pinecone_vectorstore(documents: List[Document]) -> Pinecone:
     """Set up Pinecone vector store with documents"""
     # Initialize Pinecone
     pinecone_api_key = os.environ.get("PINECONE_API_KEY")
+    pinecone_index_name = os.environ.get("PINECONE_INDEX", "convfinqa")
+    
     if not pinecone_api_key:
         raise ValueError("PINECONE_API_KEY not found in environment variables")
     
-    # Initialize Pinecone
-    pinecone.init(api_key=pinecone_api_key, environment="us-west1-gcp")
+    print(f"Connecting to existing Pinecone index: {pinecone_index_name}")
     
-    # Create index if it doesn't exist
-    index_name = "convfinqa"
-    dimension = 1536  # OpenAI embedding dimension
-    
-    # Check if index exists
-    if index_name not in pinecone.list_indexes():
-        pinecone.create_index(name=index_name, dimension=dimension, metric="cosine")
+    # Initialize Pinecone with the direct approach that works
+    # Use the approach that works for the user
+    pc = pinecone.Pinecone(api_key=pinecone_api_key)
+    index = pc.Index(pinecone_index_name)
+    print(f"Successfully connected to Pinecone index: {pinecone_index_name}")
     
     # Initialize embeddings
     embeddings = OpenAIEmbeddings()
     
     # Create Pinecone vector store
-    vectorstore = Pinecone.from_documents(
-        documents=documents,
+    vectorstore = Pinecone(
+        index=index,
         embedding=embeddings,
-        index_name=index_name
+        text_key="text"
     )
+    
+    # Add documents to the vector store
+    vectorstore.add_documents(documents)
     
     return vectorstore
 
@@ -529,6 +530,7 @@ def main():
     retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
     
     # Set up compression retriever for better results
+    # Use the same embeddings instance
     embeddings = OpenAIEmbeddings()
     embeddings_filter = EmbeddingsFilter(embeddings=embeddings, similarity_threshold=0.7)
     compression_retriever = ContextualCompressionRetriever(
@@ -541,7 +543,7 @@ def main():
         model_name="gpt-3.5-turbo",
         temperature=0.2,
         streaming=True,
-        callback_manager=CallbackManager([StreamingStdOutCallbackHandler()])
+        callbacks=[StreamingStdOutCallbackHandler()]
     )
     
     # Create prompt template

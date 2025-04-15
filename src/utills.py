@@ -4,6 +4,7 @@ from math import *
 
 # LangChain imports
 from langchain.schema import Document
+from langchain_openai import OpenAIEmbeddings
 
 
 class TableParser:
