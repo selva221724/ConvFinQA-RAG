@@ -1,0 +1,16 @@
+streamlit
+pandas
+watchdog
+plotly
+wordcloud
+nltk
+matplotlib
+langchain
+langchain-openai
+langchain-community
+pinecone-client
+openai
+python-dotenv
+numpy
+tiktoken
+faiss-cpu
