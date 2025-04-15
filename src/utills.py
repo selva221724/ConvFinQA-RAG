@@ -1,11 +1,10 @@
+
 import re
 from typing import List, Dict, Any, Optional, Tuple
 from math import *
 
 # LangChain imports
 from langchain.schema import Document
-from langchain_openai import OpenAIEmbeddings
-
 
 class TableParser:
     """Extracts and formats tables for better numerical reasoning"""
@@ -29,16 +28,22 @@ class TableParser:
                     # Convert to structured format
                     structured_table = self._parse_markdown_table(table_text)
                     
-                    # Add structured table to metadata
-                    if not doc.metadata:
-                        doc.metadata = {}
-                    doc.metadata["structured_table"] = structured_table
-                    
                     # Enhance content with explicit column descriptions
                     if structured_table:
                         table_description = self._generate_table_description(structured_table)
                         content = content.replace(table_text, table_description)
                         doc.page_content = content
+                        
+                        # Instead of storing the complex structured_table object,
+                        # just store some simple metadata about the table
+                        if not doc.metadata:
+                            doc.metadata = {}
+                        
+                        # Store simple metadata about the table (only primitive types)
+                        if structured_table and len(structured_table) > 0:
+                            doc.metadata["table_rows"] = len(structured_table)
+                            doc.metadata["table_columns"] = len(structured_table[0].keys()) if structured_table[0] else 0
+                            doc.metadata["table_columns_names"] = ", ".join(structured_table[0].keys()) if structured_table[0] else ""
             
             parsed_documents.append(doc)
         
@@ -80,17 +85,17 @@ class TableParser:
         return rows
     
     def _generate_table_description(self, structured_table: List[Dict[str, Any]]) -> str:
-        """Generate a textual description of the table for better LLM understanding"""
+        """Generate a concise textual description of the table for better LLM understanding"""
         if not structured_table:
             return ""
         
         # Get columns
         columns = list(structured_table[0].keys())
         
-        description = "Table with columns: " + ", ".join(columns) + "\n"
-        description += f"The table contains {len(structured_table)} rows of data.\n"
+        # Create a more compact description
+        description = f"Table: {len(structured_table)} rows with columns: {', '.join(columns)}\n"
         
-        # Add sample of numerical data
+        # Add sample of numerical data (only first row)
         numerical_cols = []
         for col in columns:
             # Check if column contains numbers
@@ -102,12 +107,10 @@ class TableParser:
                 continue
         
         if numerical_cols:
-            description += "Numerical columns: " + ", ".join(numerical_cols) + "\n"
-            description += "Sample values:\n"
-            
-            for col in numerical_cols:
-                sample_values = [row[col] for row in structured_table[:3]]
-                description += f"- {col}: {', '.join(sample_values)}\n"
+            # Only include a sample from the first row to save space
+            sample_row = structured_table[0]
+            num_samples = ", ".join([f"{col}: {sample_row[col]}" for col in numerical_cols[:3]])
+            description += f"Numerical data sample: {num_samples}\n"
         
         return description
 
@@ -126,18 +129,15 @@ class CalculatorTool:
             }
         
         try:
-            # Extract numbers from documents for reference
-            all_numbers = []
-            for doc in documents:
-                if "numerical_entities" in doc.metadata:
-                    all_numbers.extend(doc.metadata["numerical_entities"])
+            # Extract numbers directly from document content instead of metadata
+            # This avoids using complex objects in metadata that Pinecone doesn't support
             
             # Clean the calculation request
             clean_request = calculation_request.strip()
             
             # Handle percentage calculations
             if "%" in clean_request or "percent" in clean_request.lower():
-                result = self._handle_percentage_calculation(clean_request, all_numbers)
+                result = self._handle_percentage_calculation(clean_request)
             # Handle basic arithmetic
             else:
                 result = self._handle_arithmetic_calculation(clean_request)
@@ -155,7 +155,7 @@ class CalculatorTool:
                 "calculation_request": calculation_request
             }
     
-    def _handle_percentage_calculation(self, request: str, available_numbers: List[Dict[str, Any]]) -> str:
+    def _handle_percentage_calculation(self, request: str) -> str:
         """Handle percentage calculations"""
         # Common percentage calculation patterns
         increase_pattern = r"(?:increase|growth|change).*?from\s+(\d+(?:\.\d+)?)\s+to\s+(\d+(?:\.\d+)?)"
@@ -222,3 +222,4 @@ class CalculatorTool:
                 return f"{result:.2f}"
         except Exception as e:
             return f"Error evaluating expression: {str(e)}"
+

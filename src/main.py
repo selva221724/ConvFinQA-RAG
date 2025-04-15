@@ -9,7 +9,7 @@ from math import *
 # LangChain imports
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS, Pinecone
+from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_openai import ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
@@ -18,6 +18,9 @@ from langchain.retrievers import ContextualCompressionRetriever
 from langchain.retrievers.document_compressors import DocumentCompressorPipeline
 from langchain.retrievers.document_compressors import EmbeddingsFilter
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
+from langchain_pinecone import Pinecone
+
+from utills import TableParser, CalculatorTool
 
 # Pinecone
 import pinecone
@@ -26,11 +29,10 @@ import pinecone
 from dotenv import load_dotenv
 load_dotenv()
 
-
 class NumericalTextSplitter(RecursiveCharacterTextSplitter):
-    """Custom text splitter that preserves numerical context"""
+    """Custom text splitter that preserves numerical context and keeps tables intact"""
     
-    def __init__(self, chunk_size: int = 512, chunk_overlap: int = 128):
+    def __init__(self, chunk_size: int = 384, chunk_overlap: int = 64):
         super().__init__(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -38,297 +40,50 @@ class NumericalTextSplitter(RecursiveCharacterTextSplitter):
         )
     
     def split_documents(self, documents: List[Document]) -> List[Document]:
-        """Override to add numerical metadata to split documents"""
-        split_docs = super().split_documents(documents)
-        
-        # Enhance documents with numerical metadata
+        """Override to add numerical metadata to split documents and keep tables intact"""
         enhanced_docs = []
-        for doc in split_docs:
-            # Detect tables in content
-            contains_table = self._detect_table(doc.page_content)
-            
-            # Extract numerical entities
-            numerical_entities = self._extract_numerical_entities(doc.page_content)
-            
-            # Add metadata
-            if not doc.metadata:
-                doc.metadata = {}
-            
-            doc.metadata["contains_table"] = contains_table
-            doc.metadata["numerical_entities"] = numerical_entities
-            doc.metadata["contains_numbers"] = len(numerical_entities) > 0
-            
-            enhanced_docs.append(doc)
-        
-        return enhanced_docs
-    
-    def _detect_table(self, text: str) -> bool:
-        """Detect if text likely contains a table"""
-        # Simple heuristic: look for patterns of multiple numbers and separators
-        # Check for markdown or ascii tables
-        table_patterns = [
-            r"\|\s*[\d.]+\s*\|",  # Markdown tables with numbers
-            r"[\+\-]{3,}",        # ASCII table borders
-            r"(\d+\s+){3,}\d+"    # Multiple numbers in sequence
-        ]
-        
-        for pattern in table_patterns:
-            if re.search(pattern, text):
-                return True
-        return False
-    
-    def _extract_numerical_entities(self, text: str) -> List[Dict[str, Any]]:
-        """Extract numerical entities from text"""
-        # Match numbers with optional units/currencies
-        number_pattern = r'(\$|€|£)?(\d+(?:,\d+)*(?:\.\d+)?)\s*(million|billion|percent|%|k|M|B)?'
-        
-        matches = re.finditer(number_pattern, text)
-        entities = []
-        
-        for match in matches:
-            currency, value, unit = match.groups()
-            
-            # Clean and convert value
-            clean_value = value.replace(',', '')
-            
-            # Determine multiplier based on unit
-            multiplier = 1
-            if unit in ['million', 'M']:
-                multiplier = 1_000_000
-            elif unit in ['billion', 'B']:
-                multiplier = 1_000_000_000
-            elif unit == 'k':
-                multiplier = 1_000
-            
-            # Create entity
-            entity = {
-                "value": float(clean_value) * multiplier,
-                "raw_text": match.group(0),
-                "currency": currency if currency else None,
-                "unit": unit if unit else None,
-                "position": match.span()
-            }
-            
-            entities.append(entity)
-            
-        return entities
-
-
-class TableParser:
-    """Extracts and formats tables for better numerical reasoning"""
-    
-    def process_documents(self, documents: List[Document]) -> List[Document]:
-        """Process documents to enhance table representation"""
-        parsed_documents = []
         
         for doc in documents:
             content = doc.page_content
             
-            # Check if document contains a table
-            if doc.metadata.get("has_table", False):
-                # Extract table from markdown format
-                table_pattern = r"Table:\n(\|.+\|\n)+"
-                table_matches = re.search(table_pattern, content)
-                
-                if table_matches:
-                    table_text = table_matches.group(0)
-                    
-                    # Convert to structured format
-                    structured_table = self._parse_markdown_table(table_text)
-                    
-                    # Add structured table to metadata
-                    if not doc.metadata:
-                        doc.metadata = {}
-                    doc.metadata["structured_table"] = structured_table
-                    
-                    # Enhance content with explicit column descriptions
-                    if structured_table:
-                        table_description = self._generate_table_description(structured_table)
-                        content = content.replace(table_text, table_description)
-                        doc.page_content = content
+            # Split content into parts based on table presence
+            parts = self._split_on_tables(content)
             
-            parsed_documents.append(doc)
+            for part in parts:
+                if self._is_table(part):
+                    # Treat table as a single document
+                    enhanced_docs.append(Document(page_content=part, metadata=doc.metadata))
+                else:
+                    # Split non-table content normally
+                    split_parts = super().split_documents([Document(page_content=part, metadata=doc.metadata)])
+                    enhanced_docs.extend(split_parts)
         
-        return parsed_documents
+        return enhanced_docs
     
-    def _parse_markdown_table(self, table_text: str) -> List[Dict[str, Any]]:
-        """Parse markdown table into structured format"""
-        lines = table_text.strip().split('\n')
+    def _split_on_tables(self, text: str) -> List[str]:
+        """Split text into sections with tables intact"""
+        # Use regex to find tables and split text around them
+        table_pattern = r"(Table:\n(\|.+\|\n)+)"
+        parts = re.split(table_pattern, text)
         
-        # Remove "Table:" header if present
-        if lines[0].startswith("Table:"):
-            lines = lines[1:]
-        
-        # Extract header and rows
-        if not lines:
-            return []
-        
-        # Parse header
-        header = lines[0].strip('|').split('|')
-        header = [h.strip() for h in header]
-        
-        # Parse rows
-        rows = []
-        for line in lines[1:]:
-            if '|' not in line:  # Skip separator lines
-                continue
-            
-            row_values = line.strip('|').split('|')
-            row_values = [v.strip() for v in row_values]
-            
-            # Create row dict
-            row_dict = {}
-            for i, col in enumerate(header):
-                if i < len(row_values):
-                    row_dict[col] = row_values[i]
-            
-            rows.append(row_dict)
-        
-        return rows
-    
-    def _generate_table_description(self, structured_table: List[Dict[str, Any]]) -> str:
-        """Generate a textual description of the table for better LLM understanding"""
-        if not structured_table:
-            return ""
-        
-        # Get columns
-        columns = list(structured_table[0].keys())
-        
-        description = "Table with columns: " + ", ".join(columns) + "\n"
-        description += f"The table contains {len(structured_table)} rows of data.\n"
-        
-        # Add sample of numerical data
-        numerical_cols = []
-        for col in columns:
-            # Check if column contains numbers
-            try:
-                val = structured_table[0][col].replace(',', '')
-                float(val)
-                numerical_cols.append(col)
-            except (ValueError, TypeError):
-                continue
-        
-        if numerical_cols:
-            description += "Numerical columns: " + ", ".join(numerical_cols) + "\n"
-            description += "Sample values:\n"
-            
-            for col in numerical_cols:
-                sample_values = [row[col] for row in structured_table[:3]]
-                description += f"- {col}: {', '.join(sample_values)}\n"
-        
-        return description
-
-
-class CalculatorTool:
-    """Provides explicit calculation capabilities for numerical reasoning"""
-    
-    def calculate(self, query: str, documents: List[Document], calculation_request: Optional[str] = None) -> Dict[str, Any]:
-        """Process calculation requests"""
-        
-        if not calculation_request:
-            # No explicit calculation requested
-            return {
-                "calculation_result": None,
-                "calculation_performed": False
-            }
-        
-        try:
-            # Extract numbers from documents for reference
-            all_numbers = []
-            for doc in documents:
-                if "numerical_entities" in doc.metadata:
-                    all_numbers.extend(doc.metadata["numerical_entities"])
-            
-            # Clean the calculation request
-            clean_request = calculation_request.strip()
-            
-            # Handle percentage calculations
-            if "%" in clean_request or "percent" in clean_request.lower():
-                result = self._handle_percentage_calculation(clean_request, all_numbers)
-            # Handle basic arithmetic
+        # Combine text parts with their tables
+        combined_parts = []
+        i = 0
+        while i < len(parts):
+            if i + 2 < len(parts) and parts[i + 1].startswith("Table:"):
+                # Combine text before table and the table itself
+                combined_parts.append(parts[i] + parts[i + 1])
+                i += 3  # Skip over table parts
             else:
-                result = self._handle_arithmetic_calculation(clean_request)
-            
-            return {
-                "calculation_result": result,
-                "calculation_performed": True,
-                "calculation_request": clean_request
-            }
-            
-        except Exception as e:
-            return {
-                "calculation_result": f"Error: {str(e)}",
-                "calculation_performed": False,
-                "calculation_request": calculation_request
-            }
+                combined_parts.append(parts[i])
+                i += 1
+        
+        return combined_parts
     
-    def _handle_percentage_calculation(self, request: str, available_numbers: List[Dict[str, Any]]) -> str:
-        """Handle percentage calculations"""
-        # Common percentage calculation patterns
-        increase_pattern = r"(?:increase|growth|change).*?from\s+(\d+(?:\.\d+)?)\s+to\s+(\d+(?:\.\d+)?)"
-        percentage_of_pattern = r"(\d+(?:\.\d+)?)%\s+of\s+(\d+(?:\.\d+)?)"
-        
-        # Check for increase/decrease pattern
-        increase_match = re.search(increase_pattern, request)
-        if increase_match:
-            start_val = float(increase_match.group(1))
-            end_val = float(increase_match.group(2))
-            
-            if start_val == 0:
-                return "Cannot calculate percentage change from zero"
-            
-            percent_change = ((end_val - start_val) / start_val) * 100
-            return f"{percent_change:.2f}%"
-        
-        # Check for percentage of pattern
-        percent_of_match = re.search(percentage_of_pattern, request)
-        if percent_of_match:
-            percent = float(percent_of_match.group(1))
-            base = float(percent_of_match.group(2))
-            
-            result = (percent / 100) * base
-            return f"{result:.2f}"
-        
-        # If no pattern matched, try to evaluate as expression
-        return self._handle_arithmetic_calculation(request)
-    
-    def _handle_arithmetic_calculation(self, request: str) -> str:
-        """Handle basic arithmetic calculations"""
-        # Replace textual operators with symbols
-        request = request.lower()
-        request = request.replace("divided by", "/")
-        request = request.replace("multiplied by", "*")
-        request = request.replace("times", "*")
-        request = request.replace("plus", "+")
-        request = request.replace("minus", "-")
-        
-        # Extract the arithmetic expression
-        expression_pattern = r"([\d\s\+\-\*\/\(\)\.\,]+)"
-        match = re.search(expression_pattern, request)
-        
-        if not match:
-            return "No arithmetic expression found"
-        
-        expression = match.group(1).strip()
-        expression = expression.replace(",", "")  # Remove commas from numbers
-        
-        # Safely evaluate the expression
-        # Using eval with math functions from math module
-        try:
-            # Create a safe namespace with only math functions
-            safe_namespace = {
-                k: v for k, v in globals().items() 
-                if k in dir(math) or k in ['__builtins__']
-            }
-            result = eval(expression, {"__builtins__": {}}, safe_namespace)
-            
-            # Format based on result type
-            if isinstance(result, int):
-                return str(result)
-            else:
-                return f"{result:.2f}"
-        except Exception as e:
-            return f"Error evaluating expression: {str(e)}"
+    def _is_table(self, text: str) -> bool:
+        """Check if a text block is a table"""
+        return text.strip().startswith("Table:")
+
 
 
 class NumericalResponseValidator:
@@ -377,10 +132,31 @@ def convert_convfinqa_to_documents(data_path: str) -> List[Document]:
         # Process table if present
         table_content = ""
         if 'table' in item and item['table']:
+            # Limit large tables to reduce document size
+            max_rows = 10  # Limit to first 10 rows for large tables
+            table_rows = item['table']
+            
+            if len(table_rows) > max_rows:
+                # For large tables, only include header and first few rows
+                table_rows = [table_rows[0]] + table_rows[1:max_rows]
+                
+                # Add a note about truncation
+                truncation_note = f"Note: Table truncated to {max_rows} rows out of {len(item['table'])} total rows."
+                post_text = truncation_note + "\n" + post_text
+            
             # Convert table to markdown format
             table_content = "Table:\n"
-            for row in item['table']:
-                table_content += "| " + " | ".join(str(cell) for cell in row) + " |\n"
+            for row in table_rows:
+                # Ensure all cells are strings and limit cell content length
+                row_cells = []
+                for cell in row:
+                    cell_str = str(cell)
+                    # Truncate very long cell content
+                    if len(cell_str) > 50:
+                        cell_str = cell_str[:47] + "..."
+                    row_cells.append(cell_str)
+                
+                table_content += "| " + " | ".join(row_cells) + " |\n"
         
         # Combine all content
         content = f"{pre_text}\n\n{table_content}\n\n{post_text}"
@@ -389,7 +165,8 @@ def convert_convfinqa_to_documents(data_path: str) -> List[Document]:
         metadata = {
             "source": item.get('filename', 'unknown'),
             "has_table": bool(table_content),
-            "id": item.get('id', '')
+            "id": item.get('id', ''),
+            "original_table_size": len(item.get('table', [])) if 'table' in item else 0
         }
         
         # Create LangChain document
@@ -453,9 +230,42 @@ def setup_pinecone_vectorstore(documents: List[Document]) -> Pinecone:
         text_key="text"
     )
     
-    # Add documents to the vector store
-    vectorstore.add_documents(documents)
+    # Add documents to the vector store in batches to avoid size limits
+    batch_size = 50  # Adjust based on document sizes
+    total_batches = (len(documents) - 1) // batch_size + 1
     
+    print(f"Adding {len(documents)} documents to Pinecone in {total_batches} batches...")
+    
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i:i+batch_size]
+        batch_num = i // batch_size + 1
+        try:
+            print(f"Uploading batch {batch_num}/{total_batches} to Pinecone ({len(batch)} documents)...")
+            vectorstore.add_documents(batch)
+            print(f"Successfully uploaded batch {batch_num}")
+        except Exception as e:
+            print(f"Error uploading batch {batch_num}: {e}")
+            if "message length too large" in str(e) and batch_size > 10:
+                # If we hit size limits, try with a smaller batch
+                smaller_batch_size = batch_size // 2
+                print(f"Reducing batch size to {smaller_batch_size} and retrying...")
+                
+                # Process the current batch with smaller sub-batches
+                for j in range(0, len(batch), smaller_batch_size):
+                    sub_batch = batch[j:j+smaller_batch_size]
+                    try:
+                        print(f"Uploading sub-batch {j//smaller_batch_size + 1} with {len(sub_batch)} documents...")
+                        vectorstore.add_documents(sub_batch)
+                        print(f"Successfully uploaded sub-batch")
+                    except Exception as sub_e:
+                        print(f"Error uploading sub-batch: {sub_e}")
+                        # If even smaller batches fail, we might need to skip or process individually
+                        print("Skipping problematic documents in this sub-batch")
+            else:
+                # For other types of errors, continue with next batch
+                print("Continuing with next batch...")
+    
+    print("Completed adding documents to Pinecone")
     return vectorstore
 
 
@@ -506,7 +316,7 @@ def main():
     
     # Process documents
     print("Processing documents...")
-    text_splitter = NumericalTextSplitter(chunk_size=512, chunk_overlap=128)
+    text_splitter = NumericalTextSplitter(chunk_size=384, chunk_overlap=64)
     split_docs = text_splitter.split_documents(documents)
     
     # Process tables
