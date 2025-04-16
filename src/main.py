@@ -203,7 +203,7 @@ def create_qa_pairs(data_path: str) -> List[Dict[str, str]]:
     return qa_pairs
 
 
-def setup_pinecone_vectorstore(documents: List[Document]) -> Pinecone:
+def setup_pinecone_vectorstore(documents: List[Document], ingest_flag=False) -> Pinecone:
     """Set up Pinecone vector store with documents"""
     # Initialize Pinecone
     pinecone_api_key = os.environ.get("PINECONE_API_KEY")
@@ -230,42 +230,43 @@ def setup_pinecone_vectorstore(documents: List[Document]) -> Pinecone:
         text_key="text"
     )
     
-    # Add documents to the vector store in batches to avoid size limits
-    batch_size = 50  # Adjust based on document sizes
-    total_batches = (len(documents) - 1) // batch_size + 1
-    
-    print(f"Adding {len(documents)} documents to Pinecone in {total_batches} batches...")
-    
-    for i in range(0, len(documents), batch_size):
-        batch = documents[i:i+batch_size]
-        batch_num = i // batch_size + 1
-        try:
-            print(f"Uploading batch {batch_num}/{total_batches} to Pinecone ({len(batch)} documents)...")
-            vectorstore.add_documents(batch)
-            print(f"Successfully uploaded batch {batch_num}")
-        except Exception as e:
-            print(f"Error uploading batch {batch_num}: {e}")
-            if "message length too large" in str(e) and batch_size > 10:
-                # If we hit size limits, try with a smaller batch
-                smaller_batch_size = batch_size // 2
-                print(f"Reducing batch size to {smaller_batch_size} and retrying...")
-                
-                # Process the current batch with smaller sub-batches
-                for j in range(0, len(batch), smaller_batch_size):
-                    sub_batch = batch[j:j+smaller_batch_size]
-                    try:
-                        print(f"Uploading sub-batch {j//smaller_batch_size + 1} with {len(sub_batch)} documents...")
-                        vectorstore.add_documents(sub_batch)
-                        print(f"Successfully uploaded sub-batch")
-                    except Exception as sub_e:
-                        print(f"Error uploading sub-batch: {sub_e}")
-                        # If even smaller batches fail, we might need to skip or process individually
-                        print("Skipping problematic documents in this sub-batch")
-            else:
-                # For other types of errors, continue with next batch
-                print("Continuing with next batch...")
-    
-    print("Completed adding documents to Pinecone")
+    if ingest_flag:
+        # Add documents to the vector store in batches to avoid size limits
+        batch_size = 300  # Adjust based on document sizes
+        total_batches = (len(documents) - 1) // batch_size + 1
+        
+        print(f"Adding {len(documents)} documents to Pinecone in {total_batches} batches...")
+        
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i+batch_size]
+            batch_num = i // batch_size + 1
+            try:
+                print(f"Uploading batch {batch_num}/{total_batches} to Pinecone ({len(batch)} documents)...")
+                vectorstore.add_documents(batch)
+                print(f"Successfully uploaded batch {batch_num}")
+            except Exception as e:
+                print(f"Error uploading batch {batch_num}: {e}")
+                if "message length too large" in str(e) and batch_size > 10:
+                    # If we hit size limits, try with a smaller batch
+                    smaller_batch_size = batch_size // 2
+                    print(f"Reducing batch size to {smaller_batch_size} and retrying...")
+                    
+                    # Process the current batch with smaller sub-batches
+                    for j in range(0, len(batch), smaller_batch_size):
+                        sub_batch = batch[j:j+smaller_batch_size]
+                        try:
+                            print(f"Uploading sub-batch {j//smaller_batch_size + 1} with {len(sub_batch)} documents...")
+                            vectorstore.add_documents(sub_batch)
+                            print(f"Successfully uploaded sub-batch")
+                        except Exception as sub_e:
+                            print(f"Error uploading sub-batch: {sub_e}")
+                            # If even smaller batches fail, we might need to skip or process individually
+                            print("Skipping problematic documents in this sub-batch")
+                else:
+                    # For other types of errors, continue with next batch
+                    print("Continuing with next batch...")
+        
+        print("Completed adding documents to Pinecone")
     return vectorstore
 
 
@@ -301,7 +302,7 @@ def main():
     
     # Load and process ConvFinQA dataset
     print("Loading and processing ConvFinQA dataset...")
-    data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "dev.json")
+    data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "train.json")
     
     # Check if data file exists, if not, print a message
     if not os.path.exists(data_path):
@@ -326,7 +327,7 @@ def main():
     # Set up vector store
     print("Setting up vector store...")
     try:
-        vectorstore = setup_pinecone_vectorstore(processed_docs)
+        vectorstore = setup_pinecone_vectorstore(processed_docs, ingest_flag=False)
         print("Successfully set up Pinecone vector store")
     except Exception as e:
         print(f"Error setting up Pinecone: {e}")
@@ -375,7 +376,7 @@ def main():
     
     # Example query
     print("\nRunning example query...")
-    query = "What was the percentage increase in revenue from 2021 to 2022?"
+    query = "what was the percentage change in the net cash from operating activities from 2008 to 2009?"
     
     # Get documents for the query
     retrieved_docs = compression_retriever.get_relevant_documents(query)
