@@ -20,7 +20,17 @@ from langchain.retrievers.document_compressors import EmbeddingsFilter
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 from langchain_pinecone import Pinecone
 
-from utills import TableParser, CalculatorTool
+from utills import (
+    TableParser, 
+    CalculatorTool, 
+    AdvancedTableParser, 
+    QueryExpander, 
+    CrossEncoderReranker, 
+    CustomRetriever,
+    AdvancedCalculatorTool,
+    TORCH_AVAILABLE,
+    SENTENCE_TRANSFORMERS_AVAILABLE
+)
 
 # Pinecone
 import pinecone
@@ -240,9 +250,29 @@ def setup_pinecone_vectorstore(documents: List[Document], ingest_flag=False) -> 
         for i in range(0, len(documents), batch_size):
             batch = documents[i:i+batch_size]
             batch_num = i // batch_size + 1
+            
+            # Simplify metadata for Pinecone
+            simplified_batch = []
+            for doc in batch:
+                simplified_metadata = {}
+                for key, value in doc.metadata.items():
+                    # Convert complex objects to simple string representations
+                    if isinstance(value, list):
+                        simplified_metadata[key] = ", ".join(str(v) for v in value)
+                    elif isinstance(value, dict):
+                        simplified_metadata[key] = ", ".join(f"{k}: {v}" for k, v in value.items())
+                    else:
+                        simplified_metadata[key] = str(value)
+                
+                simplified_doc = Document(
+                    page_content=doc.page_content,
+                    metadata=simplified_metadata
+                )
+                simplified_batch.append(simplified_doc)
+            
             try:
-                print(f"Uploading batch {batch_num}/{total_batches} to Pinecone ({len(batch)} documents)...")
-                vectorstore.add_documents(batch)
+                print(f"Uploading batch {batch_num}/{total_batches} to Pinecone ({len(simplified_batch)} documents)...")
+                vectorstore.add_documents(simplified_batch)
                 print(f"Successfully uploaded batch {batch_num}")
             except Exception as e:
                 print(f"Error uploading batch {batch_num}: {e}")
@@ -252,8 +282,8 @@ def setup_pinecone_vectorstore(documents: List[Document], ingest_flag=False) -> 
                     print(f"Reducing batch size to {smaller_batch_size} and retrying...")
                     
                     # Process the current batch with smaller sub-batches
-                    for j in range(0, len(batch), smaller_batch_size):
-                        sub_batch = batch[j:j+smaller_batch_size]
+                    for j in range(0, len(simplified_batch), smaller_batch_size):
+                        sub_batch = simplified_batch[j:j+smaller_batch_size]
                         try:
                             print(f"Uploading sub-batch {j//smaller_batch_size + 1} with {len(sub_batch)} documents...")
                             vectorstore.add_documents(sub_batch)
@@ -270,23 +300,33 @@ def setup_pinecone_vectorstore(documents: List[Document], ingest_flag=False) -> 
     return vectorstore
 
 
-def create_numerical_prompt_template() -> ChatPromptTemplate:
-    """Create a prompt template for numerical reasoning"""
-    template = """You are a financial analyst assistant that specializes in numerical reasoning.
+def create_enhanced_numerical_prompt_template() -> ChatPromptTemplate:
+    """Create an enhanced prompt template for numerical reasoning based on FinanceRAG methodology"""
+    template = """You are a precise financial analyst specializing in numerical reasoning with financial documents.
     
 CONTEXT INFORMATION:
 {context}
 
 USER QUESTION: {question}
 
-Please solve this step by step:
-1. Identify the numerical values needed for the calculation
-2. Determine the mathematical operations required
-3. Perform the calculation showing your work
-4. Verify the result makes sense in the context
-5. Provide the final answer with appropriate units
+Solve this step-by-step with extreme precision:
+1. Carefully identify ALL numerical values in the context that are relevant to the question
+2. Determine the EXACT mathematical operations required for this financial calculation
+3. Perform calculations showing COMPLETE work with all intermediate steps
+4. Verify each calculation's accuracy and check if the result makes sense in the financial context
+5. Provide the final answer with:
+   - Exact numerical value (rounded to 2 decimal places if appropriate)
+   - Appropriate financial units (%, $, etc.)
+   - Brief explanation of what the number represents in context
 
-Your answer should be precise and include the exact numerical values.
+CRITICAL INSTRUCTIONS:
+- Show ALL intermediate calculation steps
+- Include units (%, $, etc.) in your final answer
+- If any calculation is uncertain, explain why and provide the most likely answer
+- For percentage changes, use the formula: ((new_value - old_value) / old_value) * 100
+- For financial ratios, clearly state the formula used
+
+Your answer must be precise, well-structured, and include the exact numerical values from the context.
 """
     
     return ChatPromptTemplate.from_template(template)
@@ -302,7 +342,7 @@ def main():
     
     # Load and process ConvFinQA dataset
     print("Loading and processing ConvFinQA dataset...")
-    data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "train.json")
+    data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "dev.json")
     
     # Check if data file exists, if not, print a message
     if not os.path.exists(data_path):
@@ -320,9 +360,10 @@ def main():
     text_splitter = NumericalTextSplitter(chunk_size=384, chunk_overlap=64)
     split_docs = text_splitter.split_documents(documents)
     
-    # Process tables
-    table_parser = TableParser()
-    processed_docs = table_parser.process_documents(split_docs)
+    # Process tables with advanced table parser
+    print("Processing tables with advanced parser...")
+    advanced_table_parser = AdvancedTableParser()
+    processed_docs = advanced_table_parser.process_documents(split_docs)
     
     # Set up vector store
     print("Setting up vector store...")
@@ -337,39 +378,55 @@ def main():
         embeddings = OpenAIEmbeddings()
         vectorstore = FAISS.from_documents(processed_docs, embeddings)
     
-    # Create retriever
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    # Create base retriever
+    base_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})  # Increased k for better reranking
     
-    # Set up compression retriever for better results
-    # Use the same embeddings instance
+    # Initialize embeddings
     embeddings = OpenAIEmbeddings()
-    embeddings_filter = EmbeddingsFilter(embeddings=embeddings, similarity_threshold=0.7)
-    compression_retriever = ContextualCompressionRetriever(
-        base_compressor=embeddings_filter,
-        base_retriever=retriever
+    
+    # Set up cross-encoder reranker
+    print("Setting up cross-encoder reranker...")
+    try:
+        # Initialize with trust_remote_code=True by default
+        reranker = CrossEncoderReranker("Alibaba-NLP/gte-multilingual-reranker-base", trust_remote_code=True)
+        print("Successfully initialized cross-encoder reranker")
+    except Exception as e:
+        print(f"Error setting up cross-encoder: {e}")
+        reranker = None
+    
+    # Set up multi-stage retriever
+    print("Setting up multi-stage retriever...")
+    multi_stage_retriever = CustomRetriever(
+        base_retriever=base_retriever,
+        embeddings=embeddings,
+        reranker=reranker,
+        top_k=5
     )
+    
+    # Initialize query expander
+    print("Initializing query expander...")
+    query_expander = QueryExpander(model_name="o3-mini")
     
     # Set up LLM
     llm = ChatOpenAI(
-        model_name="gpt-3.5-turbo",
-        temperature=0.2,
+        model_name="o3-mini",  # Using the o3-mini model as requested
         streaming=True,
         callbacks=[StreamingStdOutCallbackHandler()]
     )
     
-    # Create prompt template
-    prompt = create_numerical_prompt_template()
+    # Create enhanced prompt template
+    prompt = create_enhanced_numerical_prompt_template()
     
-    # Create QA chain
+    # Create QA chain with base retriever
     qa_chain = RetrievalQA.from_chain_type(
         llm=llm,
         chain_type="stuff",
-        retriever=compression_retriever,
+        retriever=base_retriever,
         chain_type_kwargs={"prompt": prompt}
     )
     
-    # Create calculator tool
-    calculator = CalculatorTool()
+    # Create advanced calculator tool
+    calculator = AdvancedCalculatorTool()
     
     # Create validator
     validator = NumericalResponseValidator()
@@ -378,11 +435,16 @@ def main():
     print("\nRunning example query...")
     query = "what was the percentage change in the net cash from operating activities from 2008 to 2009?"
     
-    # Get documents for the query
-    retrieved_docs = compression_retriever.get_relevant_documents(query)
+    # Expand the query using query expander
+    print("Expanding query...")
+    expanded_query = query_expander.expand_query(query)
+    print(f"Expanded query: {expanded_query}")
     
-    # Run the query
-    result = qa_chain.run(query)
+    # Get documents for the expanded query
+    retrieved_docs = multi_stage_retriever.get_relevant_documents(expanded_query)
+    
+    # Run the query with expanded query
+    result = qa_chain.run(expanded_query)
     
     # Validate the result
     validation = validator.validate(query, result)
@@ -399,8 +461,15 @@ def main():
         query = qa_pair["question"]
         expected_answer = qa_pair["answer"]
         
-        # Run the query
-        result = qa_chain.run(query)
+        # Expand the query
+        expanded_query = query_expander.expand_query(query)
+        print(f"\nExpanded query {i+1}: {expanded_query}")
+        
+        # Get documents using the expanded query
+        retrieved_docs = multi_stage_retriever.get_relevant_documents(expanded_query)
+        
+        # Run the query with expanded query
+        result = qa_chain.run(expanded_query)
         
         # Validate the result
         validation = validator.validate(query, result)

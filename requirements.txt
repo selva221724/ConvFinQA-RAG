@@ -1,3 +1,7 @@
+sentence-transformers==2.2.2
+scikit-learn==1.2.2
+numpy>=1.20.0,<2.0.0
+scipy>=1.6.0
 streamlit
 pandas
 watchdog
@@ -11,8 +15,9 @@ langchain-community
 pinecone
 openai
 python-dotenv
-numpy
+numpy<2.0  # Specify NumPy version below 2.0 to avoid compatibility issues
 tiktoken
 faiss-cpu
 langchain-pinecone 
 pinecone-notebooks
+torch
