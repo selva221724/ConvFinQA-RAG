@@ -286,7 +286,7 @@ def setup_pinecone_vectorstore(documents: List[Document], ingest_flag=False) -> 
     print(f"Successfully connected to Pinecone index: {pinecone_index_name}")
     
     # Initialize embeddings
-    embeddings = OpenAIEmbeddings()
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     
     # Create Pinecone vector store
     vectorstore = Pinecone(
@@ -434,14 +434,14 @@ def main():
         print("Falling back to FAISS vector store...")
         
         # Use FAISS as a fallback
-        embeddings = OpenAIEmbeddings()
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
         vectorstore = FAISS.from_documents(processed_docs, embeddings)
     
     # Create base retriever
     base_retriever = vectorstore.as_retriever(search_kwargs={"k": 10})  # Increased k for better reranking
     
     # Initialize embeddings
-    embeddings = OpenAIEmbeddings()
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     
     # Set up cross-encoder reranker
     print("Setting up cross-encoder reranker...")
