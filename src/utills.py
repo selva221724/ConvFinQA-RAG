@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 # Optional imports for advanced features
-TORCH_AVAILABLE = False
-SENTENCE_TRANSFORMERS_AVAILABLE = False
+TORCH_AVAILABLE = True
+SENTENCE_TRANSFORMERS_AVAILABLE = True
 
 try:
     import torch
@@ -475,15 +475,20 @@ class CustomRetriever:
             self.use_compression = False
     
     def get_relevant_documents(self, query: str) -> List[Document]:
+        """Get relevant documents using multi-stage retrieval (deprecated method)"""
+        # Call the new invoke method for backward compatibility
+        return self.invoke(query)
+    
+    def invoke(self, query: str) -> List[Document]:
         """Get relevant documents using multi-stage retrieval"""
         try:
             # First stage: Get documents from retriever
             if self.use_compression:
                 # Use compression retriever if available
-                documents = self.compression_retriever.get_relevant_documents(query)
+                documents = self.compression_retriever.invoke(query)
             else:
                 # Fall back to base retriever
-                documents = self.base_retriever.get_relevant_documents(query)
+                documents = self.base_retriever.invoke(query)
             
             # Second stage: Apply cross-encoder reranking if available
             if self.reranker is not None:
@@ -501,7 +506,11 @@ class CustomRetriever:
             print(f"Error in multi-stage retrieval: {e}")
             print("Falling back to basic retrieval")
             # Last resort fallback
-            return self.base_retriever.get_relevant_documents(query)[:self.top_k]
+            try:
+                return self.base_retriever.invoke(query)[:self.top_k]
+            except:
+                # If invoke fails, try the deprecated method as a last resort
+                return self.base_retriever.get_relevant_documents(query)[:self.top_k]
 
 
 class AdvancedCalculatorTool:

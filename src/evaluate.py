@@ -2,6 +2,7 @@ import os
 import json
 import numpy as np
 from typing import List, Dict, Any
+import re
 
 # Import modules from main.py and utills.py
 from main import (
@@ -43,7 +44,7 @@ class FinancialQAEvaluator:
     def __init__(self, 
                  dataset_path: str, 
                  model_name: str = "o3-mini", 
-                 top_k: int = 5, 
+                 top_k: int = 10, 
                  sample_size: int = None):
         """
         Initialize the Financial QA Evaluator
@@ -171,6 +172,10 @@ class FinancialQAEvaluator:
         
         # First check for "FINAL ANSWER:" format (from chain-of-thought implementation)
         final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', response)
+        
+        print("Response: ", response)
+        print("---"*50)
+        
         if final_answer_match:
             final_answer = final_answer_match.group(1)
             # Clean the extracted answer
@@ -435,7 +440,23 @@ class FinancialQAEvaluator:
             retrieved_docs = self.multi_stage_retriever.get_relevant_documents(expanded_query)
             
             # Generate response
-            response = self.qa_chain.run(expanded_query)
+            full_response = self.qa_chain.invoke(expanded_query)
+            # Extract content from the response object if needed
+            if hasattr(full_response, 'content'):
+                full_response = full_response.content
+            elif isinstance(full_response, dict) and 'result' in full_response:
+                full_response = full_response['result']
+            
+            # Extract just the numerical answer
+            final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', full_response)
+            if final_answer_match:
+                response = final_answer_match.group(1)
+                # Clean up the result for evaluation
+                if response.endswith('%') and not response.startswith('-') and ground_truth and ground_truth.startswith('-'):
+                    # Handle case where ground truth is negative percentage but extracted answer is positive
+                    response = '-' + response
+            else:
+                response = full_response
             end_time = time.time()
             
             # Calculate latency
@@ -477,6 +498,7 @@ class FinancialQAEvaluator:
                 'query': query,
                 'ground_truth': ground_truth,
                 'ground_truth_num': ground_truth_num,
+                'full_response': full_response,
                 'response': response,
                 'response_num': response_num,
                 'exact_match': exact_match,

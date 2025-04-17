@@ -325,8 +325,12 @@ CRITICAL INSTRUCTIONS:
 
 FINAL ANSWER FORMAT:
 After your detailed reasoning, you MUST end your response with a line that says "FINAL ANSWER:" followed by ONLY the numerical result (with % or $ if appropriate). 
-For example: "FINAL ANSWER: 42.5%" or "FINAL ANSWER: 1000000" or "FINAL ANSWER: $50.25"
+For example: "FINAL ANSWER: 42.5%" or "FINAL ANSWER: -21.1%" or "FINAL ANSWER: 1000000"
+The out put should not have millions or billions or currency appended to the answer FINAL ANSWER:, just the number.
+For example bad answers are "FINAL ANSWER: $1,000,000" or "FINAL ANSWER: 1 million" or "FINAL ANSWER: 1 billion"
+Be sure to include the negative sign (-) for negative percentages or values.
 Do not include any additional text, explanations, or context after the FINAL ANSWER line.
+This format is critical for automated evaluation.
 """
     
     return ChatPromptTemplate.from_template(template)
@@ -400,7 +404,7 @@ def main():
         base_retriever=base_retriever,
         embeddings=embeddings,
         reranker=reranker,
-        top_k=5
+        top_k=10
     )
     
     # Initialize query expander
@@ -431,37 +435,6 @@ def main():
     # Create validator
     validator = NumericalResponseValidator()
     
-    # Example query
-    print("\nRunning example query...")
-    query = "what was the percentage change in the net cash from operating activities from 2008 to 2009?"
-    
-    # Expand the query using query expander
-    print("Expanding query...")
-    expanded_query = query_expander.expand_query(query)
-    print(f"Expanded query: {expanded_query}")
-    
-    # Get documents for the expanded query
-    retrieved_docs = multi_stage_retriever.get_relevant_documents(expanded_query)
-    
-    # Run the query with expanded query
-    full_result = qa_chain.run(expanded_query)
-    
-    # Extract just the numerical answer
-    final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', full_result)
-    
-    if final_answer_match:
-        result = final_answer_match.group(1)
-    else:
-        result = full_result
-    
-    # Validate the result
-    validation = validator.validate(query, result)
-    
-    print("\nQuery:", query)
-    print("\nFull Response:", full_result)
-    print("\nExtracted Answer:", result)
-    print("\nValidation:", validation["validation"])
-    
     # Evaluate on a few examples from the dataset
     print("\nEvaluating on sample queries...")
     sample_queries = qa_pairs[:5]  # Take first 5 QA pairs for demonstration
@@ -472,13 +445,18 @@ def main():
         
         # Expand the query
         expanded_query = query_expander.expand_query(query)
-        print(f"\nExpanded query {i+1}: {expanded_query}")
+        # print(f"\nExpanded query {i+1}: {expanded_query}")
         
-        # Get documents using the expanded query
-        retrieved_docs = multi_stage_retriever.get_relevant_documents(expanded_query)
+        # # Get documents using the expanded query
+        # retrieved_docs = multi_stage_retriever.invoke(expanded_query)
         
         # Run the query with expanded query
-        full_result = qa_chain.run(expanded_query)
+        full_result = qa_chain.invoke(expanded_query)
+        # Extract content from the response object if needed
+        if hasattr(full_result, 'content'):
+            full_result = full_result.content
+        elif isinstance(full_result, dict) and 'result' in full_result:
+            full_result = full_result['result']
         
         # Extract just the numerical answer
         final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', full_result)
@@ -498,7 +476,7 @@ def main():
         print(f"\nExample {i+1}:")
         print("Question:", query)
         print("Expected Answer:", expected_answer)
-        print("Full Model Answer:", full_result)
+        # print("Full Model Answer:", full_result)
         print("Extracted Answer:", result)
         print("Validation:", validation["validation"])
         print("-" * 80)
