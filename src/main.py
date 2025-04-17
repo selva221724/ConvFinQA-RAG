@@ -5,6 +5,8 @@ import numpy as np
 import re
 from typing import List, Dict, Any, Optional, Tuple
 from math import *
+from typing import List
+from bs4 import BeautifulSoup  # You'll need to install beautifulsoup4
 
 # LangChain imports
 from langchain.schema import Document
@@ -56,43 +58,64 @@ class NumericalTextSplitter(RecursiveCharacterTextSplitter):
         for doc in documents:
             content = doc.page_content
             
-            # Split content into parts based on table presence
-            parts = self._split_on_tables(content)
+            # Check if content contains a table
+            table_sections = self._extract_tables(content)
             
-            for part in parts:
-                if self._is_table(part):
-                    # Treat table as a single document
-                    enhanced_docs.append(Document(page_content=part, metadata=doc.metadata))
-                else:
-                    # Split non-table content normally
-                    split_parts = super().split_documents([Document(page_content=part, metadata=doc.metadata)])
-                    enhanced_docs.extend(split_parts)
+            if table_sections:
+                # Process content with tables
+                for is_table, section in table_sections:
+                    part_metadata = doc.metadata.copy()
+                    part_metadata["has_table"] = is_table
+                    
+                    if is_table:
+                        # Keep table sections as single chunks
+                        enhanced_docs.append(Document(page_content=section, metadata=part_metadata))
+                    else:
+                        # Split non-table content normally
+                        split_parts = super().split_documents([Document(page_content=section, metadata=part_metadata)])
+                        enhanced_docs.extend(split_parts)
+            else:
+                # No tables, process normally with has_table=False
+                part_metadata = doc.metadata.copy()
+                part_metadata["has_table"] = False
+                split_parts = super().split_documents([Document(page_content=content, metadata=part_metadata)])
+                enhanced_docs.extend(split_parts)
         
         return enhanced_docs
     
-    def _split_on_tables(self, text: str) -> List[str]:
-        """Split text into sections with tables intact"""
-        # Use regex to find tables and split text around them
-        table_pattern = r"(Table:\n(\|.+\|\n)+)"
-        parts = re.split(table_pattern, text)
+    def _extract_tables(self, text: str) -> List[Tuple[bool, str]]:
+        """
+        Extract table and non-table sections from text.
+        Returns a list of tuples (is_table, section_text)
+        """
+        # Pattern to match table sections (starts with "Table:" and continues until blank line or end)
+        table_pattern = r"(Table:\n(?:.+\n)+?)(?:\n\n|$)"
         
-        # Combine text parts with their tables
-        combined_parts = []
-        i = 0
-        while i < len(parts):
-            if i + 2 < len(parts) and parts[i + 1].startswith("Table:"):
-                # Combine text before table and the table itself
-                combined_parts.append(parts[i] + parts[i + 1])
-                i += 3  # Skip over table parts
-            else:
-                combined_parts.append(parts[i])
-                i += 1
+        sections = []
+        last_end = 0
         
-        return combined_parts
+        # Find all table sections
+        for match in re.finditer(table_pattern, text):
+            start, end = match.span()
+            
+            # Add text before this table (if any)
+            if start > last_end:
+                sections.append((False, text[last_end:start]))
+            
+            # Add the table section
+            sections.append((True, match.group(1)))
+            last_end = end
+        
+        # Add any remaining text after the last table
+        if last_end < len(text):
+            sections.append((False, text[last_end:]))
+        
+        return sections
     
     def _is_table(self, text: str) -> bool:
         """Check if a text block is a table"""
-        return text.strip().startswith("Table:")
+        # More robust check for table content
+        return bool(re.match(r"Table:\n", text))
 
 
 
@@ -109,7 +132,7 @@ class NumericalResponseValidator:
         
         # Check if units are included
         has_units = any(unit in response.lower() for unit in 
-                        ['%', 'percent', 'dollar', '$', 'million', 'billion', 'euro', '€'])
+                        ['%'])
         
         # Validation result
         validation = {
@@ -136,47 +159,79 @@ def convert_convfinqa_to_documents(data_path: str) -> List[Document]:
     
     for item in data:
         # Process text content
-        pre_text = "\n".join(item.get('pre_text', []))
-        post_text = "\n".join(item.get('post_text', []))
+        pre_text = item['annotation'].get('amt_pre_text', []) 
+        post_text = item['annotation'].get('amt_post_text', [])
+
         
         # Process table if present
         table_content = ""
-        if 'table' in item and item['table']:
-            # Limit large tables to reduce document size
-            max_rows = 10  # Limit to first 10 rows for large tables
-            table_rows = item['table']
-            
-            if len(table_rows) > max_rows:
-                # For large tables, only include header and first few rows
-                table_rows = [table_rows[0]] + table_rows[1:max_rows]
+        table_data = item['annotation'].get('amt_table', None)
                 
-                # Add a note about truncation
-                truncation_note = f"Note: Table truncated to {max_rows} rows out of {len(item['table'])} total rows."
-                post_text = truncation_note + "\n" + post_text
-            
-            # Convert table to markdown format
-            table_content = "Table:\n"
-            for row in table_rows:
-                # Ensure all cells are strings and limit cell content length
-                row_cells = []
-                for cell in row:
-                    cell_str = str(cell)
-                    # Truncate very long cell content
-                    if len(cell_str) > 50:
-                        cell_str = cell_str[:47] + "..."
-                    row_cells.append(cell_str)
+        if table_data:
+            # Handle HTML table format (wikitable)
+            if isinstance(table_data, str) and ("<table" in table_data or "wikitable" in table_data):
+                try:
+                    # Use BeautifulSoup for proper HTML parsing
+                    soup = BeautifulSoup(table_data, 'html.parser')
+                    table = soup.find('table')
+                    
+                    if table:
+                        rows = table.find_all('tr')
+                        table_content = "Table:\n"
+                        
+                        for row in rows:
+                            cells = row.find_all(['td', 'th'])
+                            row_content = "| " + " | ".join([cell.get_text().strip() for cell in cells]) + " |"
+                            table_content += row_content + "\n"
+                except Exception as e:
+                    # Fallback to simpler approach if BeautifulSoup fails
+                    table_text = table_data
+                    table_text = table_text.replace('<table class=\'wikitable\'>', 'Table:')
+                    table_text = table_text.replace('</table>', '')
+                    table_text = table_text.replace('<tr>', '')
+                    table_text = table_text.replace('</tr>', '\n')
+                    table_text = table_text.replace('<td>', ' | ')
+                    table_text = table_text.replace('</td>', '')
+                    table_text = re.sub(r'<[^>]+>', '', table_text)
+                    table_text = re.sub(r'\s+\|\s+', ' | ', table_text)
+                    table_content = table_text
+            else:
+                # Handle list format tables
+                max_rows = 10  # Limit to first 10 rows for large tables
+                table_rows = table_data if isinstance(table_data, list) else []
                 
-                table_content += "| " + " | ".join(row_cells) + " |\n"
+                if len(table_rows) > max_rows:
+                    # For large tables, only include header and first few rows
+                    table_rows = [table_rows[0]] + table_rows[1:max_rows]
+                    
+                    # Add a note about truncation
+                    truncation_note = f"Note: Table truncated to {max_rows} rows out of {len(table_data)} total rows."
+                    post_text = truncation_note + "\n" + post_text
+                
+                # Convert table to plain text format
+                table_content = "Table:\n"
+                for row in table_rows:
+                    # Ensure all cells are strings and limit cell content length
+                    row_cells = []
+                    for cell in row:
+                        cell_str = str(cell)
+                        # Truncate very long cell content
+                        if len(cell_str) > 50:
+                            cell_str = cell_str[:47] + "..."
+                        row_cells.append(cell_str)
+                    
+                    table_content += "| " + " | ".join(row_cells) + " |\n"
         
         # Combine all content
         content = f"{pre_text}\n\n{table_content}\n\n{post_text}"
+        
         
         # Create document with metadata
         metadata = {
             "source": item.get('filename', 'unknown'),
             "has_table": bool(table_content),
             "id": item.get('id', ''),
-            "original_table_size": len(item.get('table', [])) if 'table' in item else 0
+            "original_table_size": len(item['annotation'].get('amt_table', [])) if 'table' in item else 0
         }
         
         # Create LangChain document
@@ -372,7 +427,7 @@ def main():
     # Set up vector store
     print("Setting up vector store...")
     try:
-        vectorstore = setup_pinecone_vectorstore(processed_docs, ingest_flag=False)
+        vectorstore = setup_pinecone_vectorstore(processed_docs, ingest_flag=True)
         print("Successfully set up Pinecone vector store")
     except Exception as e:
         print(f"Error setting up Pinecone: {e}")

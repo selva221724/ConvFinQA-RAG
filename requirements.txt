@@ -21,3 +21,4 @@ faiss-cpu
 langchain-pinecone 
 pinecone-notebooks
 torch
+bs4
