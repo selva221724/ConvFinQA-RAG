@@ -26,6 +26,19 @@ from langchain.chains import RetrievalQA
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+
+import ssl
+
+# Bypass SSL verification
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    # Legacy Python that doesn't verify HTTPS certificates by default
+    pass
+else:
+    # For newer Python versions
+    ssl._create_default_https_context = _create_unverified_https_context
+    
 class FinancialQAEvaluator:
     def __init__(self, 
                  dataset_path: str, 
@@ -156,20 +169,47 @@ class FinancialQAEvaluator:
         """
         import re
         
+        # First check for "FINAL ANSWER:" format (from chain-of-thought implementation)
+        final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', response)
+        if final_answer_match:
+            final_answer = final_answer_match.group(1)
+            # Clean the extracted answer
+            final_answer = final_answer.replace(',', '')
+            # Handle percentage
+            if '%' in final_answer:
+                final_answer = final_answer.replace('%', '')
+                try:
+                    return float(final_answer)
+                except ValueError:
+                    pass
+            # Handle currency
+            if '$' in final_answer:
+                final_answer = final_answer.replace('$', '')
+                try:
+                    return float(final_answer)
+                except ValueError:
+                    pass
+            # Handle plain number
+            try:
+                return float(final_answer)
+            except ValueError:
+                pass
+        
+        # Fallback to original extraction method if FINAL ANSWER format not found
         # Enhanced regex to capture more numerical formats
         number_patterns = [
             # Percentage with optional space
-            r'(\d+(?:,\d+)*(?:\.\d+)?)\s*%',
+            r'([-+]?\d+(?:,\d+)*(?:\.\d+)?)\s*%',
             # Decimal numbers with optional commas
-            r'(\d+(?:,\d+)*(?:\.\d+)?)',
+            r'([-+]?\d+(?:,\d+)*(?:\.\d+)?)',
             # Whole numbers with optional commas
-            r'(\d+(?:,\d+)*)'
+            r'([-+]?\d+(?:,\d+)*)'
         ]
         
         # Context-aware extraction
         if ground_truth and '%' in ground_truth:
             # Prioritize percentage extraction if ground truth is a percentage
-            percentage_pattern = r'(\d+(?:,\d+)*(?:\.\d+)?)\s*%'
+            percentage_pattern = r'([-+]?\d+(?:,\d+)*(?:\.\d+)?)\s*%'
             numbers = re.findall(percentage_pattern, response)
             
             if numbers:
@@ -193,7 +233,7 @@ class FinancialQAEvaluator:
                     # Additional validation for percentage-like numbers
                     if ground_truth and '%' in ground_truth:
                         # Ensure extracted number is reasonable for a percentage
-                        if 0 <= extracted_num <= 200:
+                        if 0 <= abs(extracted_num) <= 200:
                             return extracted_num
                     else:
                         return extracted_num
@@ -274,35 +314,133 @@ class FinancialQAEvaluator:
             'decimal_precision_match': decimal_precision_match
         }
 
+    def calculate_precision_recall_f1(self, retrieved_docs: List[Document], relevant_docs: List[str]) -> Dict[str, float]:
+        """
+        Calculate precision, recall, and F1 score for retrieved documents
+        
+        :param retrieved_docs: List of retrieved documents
+        :param relevant_docs: List of relevant document IDs
+        :return: Dictionary with precision, recall, and F1 metrics
+        """
+        # Extract IDs from retrieved documents
+        retrieved_ids = [doc.metadata.get('id', '') for doc in retrieved_docs]
+        
+        # Calculate true positives (documents that are both retrieved and relevant)
+        true_positives = len(set(retrieved_ids).intersection(set(relevant_docs)))
+        
+        # Calculate precision, recall, and F1
+        precision = true_positives / len(retrieved_ids) if retrieved_ids else 0
+        recall = true_positives / len(relevant_docs) if relevant_docs else 0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1
+        }
+    
+    def calculate_mrr(self, retrieved_docs: List[Document], relevant_doc_id: str) -> float:
+        """
+        Calculate Mean Reciprocal Rank (MRR)
+        
+        :param retrieved_docs: List of retrieved documents
+        :param relevant_doc_id: ID of the relevant document
+        :return: MRR score
+        """
+        # Extract IDs from retrieved documents
+        retrieved_ids = [doc.metadata.get('id', '') for doc in retrieved_docs]
+        
+        # Find the rank of the first relevant document
+        try:
+            rank = retrieved_ids.index(relevant_doc_id) + 1  # +1 because ranks start at 1
+            return 1.0 / rank
+        except ValueError:
+            # Relevant document not found in retrieved documents
+            return 0.0
+    
+    def calculate_ndcg(self, retrieved_docs: List[Document], relevant_docs: List[str]) -> float:
+        """
+        Calculate Normalized Discounted Cumulative Gain (NDCG)
+        
+        :param retrieved_docs: List of retrieved documents
+        :param relevant_docs: List of relevant document IDs
+        :return: NDCG score
+        """
+        # Extract IDs from retrieved documents
+        retrieved_ids = [doc.metadata.get('id', '') for doc in retrieved_docs]
+        
+        # Calculate DCG
+        dcg = 0
+        for i, doc_id in enumerate(retrieved_ids):
+            # Relevance is binary (1 if relevant, 0 if not)
+            relevance = 1 if doc_id in relevant_docs else 0
+            # DCG formula: rel_i / log2(i+2)
+            dcg += relevance / np.log2(i + 2)  # i+2 because i starts at 0 and log2(1) is 0
+        
+        # Calculate IDCG (ideal DCG)
+        # In the ideal case, all relevant documents come first
+        idcg = 0
+        for i in range(min(len(relevant_docs), len(retrieved_ids))):
+            idcg += 1 / np.log2(i + 2)
+        
+        # Calculate NDCG
+        return dcg / idcg if idcg > 0 else 0
+    
     def evaluate(self) -> Dict[str, Any]:
         """
         Perform comprehensive evaluation of the QA system
         
         :return: Evaluation metrics dictionary
         """
+        import time
+        from nltk.translate.bleu_score import sentence_bleu
+        from nltk.tokenize import word_tokenize
+        
+        # Try to import NLTK and download necessary data
+        try:
+            import nltk
+            nltk.download('punkt', quiet=True)
+        except:
+            print("Warning: NLTK not fully available. BLEU scores may not be calculated correctly.")
+        
         results = {
             'total_samples': len(self.qa_pairs),
             'metrics': {
                 'exact_match_accuracy': 0,
                 'semantic_similarity_avg': 0,
-                'retrieval_recall': 0,
-                'numerical_accuracy': 0
+                'numerical_accuracy': 0,
+                'precision_avg': 0,
+                'recall_avg': 0,
+                'f1_score_avg': 0,
+                'mrr_avg': 0,
+                'ndcg_avg': 0,
+                'bleu_score_avg': 0,
+                'average_latency': 0
             },
             'detailed_results': []
         }
         
+        total_latency = 0
+        
         for qa_pair in self.qa_pairs:
             query = qa_pair['question']
             ground_truth = qa_pair['answer']
+            document_id = qa_pair['document_id']
             
             # Expand query
             expanded_query = self.query_expander.expand_query(query)
             
             # Retrieve documents
+            start_time = time.time()
             retrieved_docs = self.multi_stage_retriever.get_relevant_documents(expanded_query)
             
             # Generate response
             response = self.qa_chain.run(expanded_query)
+            end_time = time.time()
+            
+            # Calculate latency
+            latency = end_time - start_time
+            total_latency += latency
             
             # Validate response
             validation = self.validator.validate(query, response)
@@ -321,6 +459,19 @@ class FinancialQAEvaluator:
             numerical_comparison = self.compare_numerical_answers(response_num, ground_truth_num)
             numerical_accuracy = numerical_comparison['is_match']
             
+            # Calculate RAG metrics
+            rag_metrics = self.calculate_precision_recall_f1(retrieved_docs, [document_id])
+            mrr = self.calculate_mrr(retrieved_docs, document_id)
+            ndcg = self.calculate_ndcg(retrieved_docs, [document_id])
+            
+            # Calculate BLEU score
+            try:
+                reference = [word_tokenize(ground_truth.lower())]
+                candidate = word_tokenize(response.lower())
+                bleu_score = sentence_bleu(reference, candidate)
+            except:
+                bleu_score = 0
+            
             # Store detailed result
             result_entry = {
                 'query': query,
@@ -332,7 +483,12 @@ class FinancialQAEvaluator:
                 'semantic_similarity': semantic_sim,
                 'numerical_accuracy': numerical_accuracy,
                 'numerical_comparison': numerical_comparison,
-                'validation': validation['validation']
+                'validation': validation['validation'],
+                'rag_metrics': rag_metrics,
+                'mrr': mrr,
+                'ndcg': ndcg,
+                'bleu_score': bleu_score,
+                'latency': latency
             }
             results['detailed_results'].append(result_entry)
             
@@ -340,12 +496,25 @@ class FinancialQAEvaluator:
             results['metrics']['exact_match_accuracy'] += exact_match
             results['metrics']['semantic_similarity_avg'] += semantic_sim
             results['metrics']['numerical_accuracy'] += numerical_accuracy
+            results['metrics']['precision_avg'] += rag_metrics['precision']
+            results['metrics']['recall_avg'] += rag_metrics['recall']
+            results['metrics']['f1_score_avg'] += rag_metrics['f1_score']
+            results['metrics']['mrr_avg'] += mrr
+            results['metrics']['ndcg_avg'] += ndcg
+            results['metrics']['bleu_score_avg'] += bleu_score
         
         # Compute final metrics
         total_samples = len(self.qa_pairs)
         results['metrics']['exact_match_accuracy'] /= total_samples
         results['metrics']['semantic_similarity_avg'] /= total_samples
         results['metrics']['numerical_accuracy'] /= total_samples
+        results['metrics']['precision_avg'] /= total_samples
+        results['metrics']['recall_avg'] /= total_samples
+        results['metrics']['f1_score_avg'] /= total_samples
+        results['metrics']['mrr_avg'] /= total_samples
+        results['metrics']['ndcg_avg'] /= total_samples
+        results['metrics']['bleu_score_avg'] /= total_samples
+        results['metrics']['average_latency'] = total_latency / total_samples
         
         return results
 

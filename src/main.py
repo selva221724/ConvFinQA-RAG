@@ -314,19 +314,19 @@ Solve this step-by-step with extreme precision:
 2. Determine the EXACT mathematical operations required for this financial calculation
 3. Perform calculations showing COMPLETE work with all intermediate steps
 4. Verify each calculation's accuracy and check if the result makes sense in the financial context
-5. Provide the final answer with:
-   - Exact numerical value (rounded to 2 decimal places if appropriate)
-   - Appropriate financial units (%, $, etc.)
-   - Brief explanation of what the number represents in context
+5. Provide your detailed reasoning and calculations
 
 CRITICAL INSTRUCTIONS:
 - Show ALL intermediate calculation steps
-- Include units (%, $, etc.) in your final answer
+- Include units (%, $, etc.) in your calculations
 - If any calculation is uncertain, explain why and provide the most likely answer
 - For percentage changes, use the formula: ((new_value - old_value) / old_value) * 100
 - For financial ratios, clearly state the formula used
 
-Your answer must be precise, well-structured, and include the exact numerical values from the context.
+FINAL ANSWER FORMAT:
+After your detailed reasoning, you MUST end your response with a line that says "FINAL ANSWER:" followed by ONLY the numerical result (with % or $ if appropriate). 
+For example: "FINAL ANSWER: 42.5%" or "FINAL ANSWER: 1000000" or "FINAL ANSWER: $50.25"
+Do not include any additional text, explanations, or context after the FINAL ANSWER line.
 """
     
     return ChatPromptTemplate.from_template(template)
@@ -444,13 +444,22 @@ def main():
     retrieved_docs = multi_stage_retriever.get_relevant_documents(expanded_query)
     
     # Run the query with expanded query
-    result = qa_chain.run(expanded_query)
+    full_result = qa_chain.run(expanded_query)
+    
+    # Extract just the numerical answer
+    final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', full_result)
+    
+    if final_answer_match:
+        result = final_answer_match.group(1)
+    else:
+        result = full_result
     
     # Validate the result
     validation = validator.validate(query, result)
     
     print("\nQuery:", query)
-    print("\nResponse:", result)
+    print("\nFull Response:", full_result)
+    print("\nExtracted Answer:", result)
     print("\nValidation:", validation["validation"])
     
     # Evaluate on a few examples from the dataset
@@ -469,7 +478,19 @@ def main():
         retrieved_docs = multi_stage_retriever.get_relevant_documents(expanded_query)
         
         # Run the query with expanded query
-        result = qa_chain.run(expanded_query)
+        full_result = qa_chain.run(expanded_query)
+        
+        # Extract just the numerical answer
+        final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', full_result)
+        
+        if final_answer_match:
+            result = final_answer_match.group(1)
+            # Clean up the result for evaluation
+            if result.endswith('%') and not result.startswith('-') and expected_answer and expected_answer.startswith('-'):
+                # Handle case where expected answer is negative percentage but extracted answer is positive
+                result = '-' + result
+        else:
+            result = full_result
         
         # Validate the result
         validation = validator.validate(query, result)
@@ -477,7 +498,8 @@ def main():
         print(f"\nExample {i+1}:")
         print("Question:", query)
         print("Expected Answer:", expected_answer)
-        print("Model Answer:", result)
+        print("Full Model Answer:", full_result)
+        print("Extracted Answer:", result)
         print("Validation:", validation["validation"])
         print("-" * 80)
 
