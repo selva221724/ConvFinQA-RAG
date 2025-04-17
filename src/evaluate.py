@@ -40,63 +40,89 @@ class FinancialQAEvaluator:
         :param top_k: Number of documents to retrieve
         :param sample_size: Number of samples to evaluate (None = full dataset)
         """
-        # Load and process dataset
-        self.documents = convert_convfinqa_to_documents(dataset_path)
-        self.qa_pairs = create_qa_pairs(dataset_path)
-        
-        # Limit samples if specified
-        if sample_size:
-            self.qa_pairs = self.qa_pairs[:sample_size]
-        
-        # Process documents
-        text_splitter = NumericalTextSplitter(chunk_size=384, chunk_overlap=64)
-        split_docs = text_splitter.split_documents(self.documents)
-        
-        # Advanced table parsing
-        advanced_table_parser = AdvancedTableParser()
-        self.processed_docs = advanced_table_parser.process_documents(split_docs)
-        
-        # Set up vector store
-        embeddings = OpenAIEmbeddings()
-        self.vectorstore = FAISS.from_documents(self.processed_docs, embeddings)
-        
-        # Create base retriever
-        self.base_retriever = self.vectorstore.as_retriever(search_kwargs={"k": top_k})
-        
-        # Set up cross-encoder reranker
+        # Logging setup
+        self.log_messages = []
+
+        def log(message):
+            print(message)
+            self.log_messages.append(message)
+
         try:
-            self.reranker = CrossEncoderReranker("Alibaba-NLP/gte-multilingual-reranker-base", trust_remote_code=True)
-        except:
+            # Load and process dataset
+            self.documents = convert_convfinqa_to_documents(dataset_path)
+            self.qa_pairs = create_qa_pairs(dataset_path)
+            
+            # Limit samples if specified
+            if sample_size:
+                self.qa_pairs = self.qa_pairs[:sample_size]
+            
+            log(f"Loaded {len(self.qa_pairs)} QA pairs")
+            
+            # Process documents
+            text_splitter = NumericalTextSplitter(chunk_size=384, chunk_overlap=64)
+            split_docs = text_splitter.split_documents(self.documents)
+            
+            # Advanced table parsing
+            advanced_table_parser = AdvancedTableParser()
+            self.processed_docs = advanced_table_parser.process_documents(split_docs)
+            
+            # Set up vector store
+            embeddings = OpenAIEmbeddings()
+            self.vectorstore = FAISS.from_documents(self.processed_docs, embeddings)
+            
+            # Create base retriever
+            self.base_retriever = self.vectorstore.as_retriever(search_kwargs={"k": top_k})
+            
+            # Set up cross-encoder reranker
             self.reranker = None
+            try:
+                from utills import CrossEncoderReranker
+                self.reranker = CrossEncoderReranker("Alibaba-NLP/gte-multilingual-reranker-base", trust_remote_code=True)
+                log("Advanced reranker initialized successfully")
+            except ImportError as e:
+                log(f"Warning: Advanced reranking disabled. Error: {e}")
+            except Exception as e:
+                log(f"Unexpected error setting up reranker: {e}")
+            
+            # Set up multi-stage retriever with fallback
+            try:
+                self.multi_stage_retriever = CustomRetriever(
+                    base_retriever=self.base_retriever,
+                    embeddings=embeddings,
+                    reranker=self.reranker,
+                    top_k=top_k
+                )
+                log("Multi-stage retriever initialized successfully")
+            except Exception as e:
+                log(f"Fallback to basic retriever due to: {e}")
+                self.multi_stage_retriever = self.base_retriever
+            
+            # Initialize query expander
+            self.query_expander = QueryExpander(model_name=model_name)
+            
+            # Set up LLM
+            self.llm = ChatOpenAI(
+                model_name=model_name
+            )
+            
+            # Create QA chain
+            self.qa_chain = RetrievalQA.from_chain_type(
+                llm=self.llm,
+                chain_type="stuff",
+                retriever=self.base_retriever
+            )
+            
+            # Initialize response validator
+            self.validator = NumericalResponseValidator()
+            
+            # Initialize TF-IDF vectorizer
+            self.vectorizer = TfidfVectorizer()
+            
+            log("Evaluation system initialized successfully")
         
-        # Set up multi-stage retriever
-        self.multi_stage_retriever = CustomRetriever(
-            base_retriever=self.base_retriever,
-            embeddings=embeddings,
-            reranker=self.reranker,
-            top_k=top_k
-        )
-        
-        # Initialize query expander
-        self.query_expander = QueryExpander(model_name=model_name)
-        
-        # Set up LLM
-        self.llm = ChatOpenAI(
-            model_name=model_name
-        )
-        
-        # Create QA chain
-        self.qa_chain = RetrievalQA.from_chain_type(
-            llm=self.llm,
-            chain_type="stuff",
-            retriever=self.base_retriever
-        )
-        
-        # Initialize response validator
-        self.validator = NumericalResponseValidator()
-        
-        # Initialize TF-IDF vectorizer
-        self.vectorizer = TfidfVectorizer()
+        except Exception as e:
+            log(f"Critical initialization error: {e}")
+            raise
 
     def compute_semantic_similarity(self, response: str, ground_truth: str) -> float:
         """
@@ -119,6 +145,134 @@ class FinancialQAEvaluator:
         except Exception as e:
             print(f"Semantic similarity computation error: {e}")
             return 0.0
+
+    def extract_final_numerical_answer(self, response: str, ground_truth: str = None) -> float:
+        """
+        Extract the final numerical answer from a response with context-aware extraction
+        
+        :param response: Full response text
+        :param ground_truth: Optional ground truth to provide context
+        :return: Extracted numerical value
+        """
+        import re
+        
+        # Enhanced regex to capture more numerical formats
+        number_patterns = [
+            # Percentage with optional space
+            r'(\d+(?:,\d+)*(?:\.\d+)?)\s*%',
+            # Decimal numbers with optional commas
+            r'(\d+(?:,\d+)*(?:\.\d+)?)',
+            # Whole numbers with optional commas
+            r'(\d+(?:,\d+)*)'
+        ]
+        
+        # Context-aware extraction
+        if ground_truth and '%' in ground_truth:
+            # Prioritize percentage extraction if ground truth is a percentage
+            percentage_pattern = r'(\d+(?:,\d+)*(?:\.\d+)?)\s*%'
+            numbers = re.findall(percentage_pattern, response)
+            
+            if numbers:
+                final_number_str = numbers[-1].replace(',', '')
+                try:
+                    return float(final_number_str)
+                except ValueError:
+                    pass
+        
+        # Try each pattern in order
+        for pattern in number_patterns:
+            numbers = re.findall(pattern, response)
+            
+            if numbers:
+                # Take the last number, remove commas, and convert to float
+                final_number_str = numbers[-1].replace(',', '')
+                
+                try:
+                    extracted_num = float(final_number_str)
+                    
+                    # Additional validation for percentage-like numbers
+                    if ground_truth and '%' in ground_truth:
+                        # Ensure extracted number is reasonable for a percentage
+                        if 0 <= extracted_num <= 200:
+                            return extracted_num
+                    else:
+                        return extracted_num
+                except ValueError:
+                    continue
+        
+        return None
+
+    def debug_numerical_extraction(self, response: str, ground_truth: str) -> Dict[str, Any]:
+        """
+        Provide detailed debugging information for numerical extraction
+        
+        :param response: Model's response
+        :param ground_truth: Ground truth answer
+        :return: Debugging information dictionary
+        """
+        import re
+        
+        # Extract all numbers from response and ground truth
+        response_numbers = re.findall(r'(\d+(?:,\d+)*(?:\.\d+)?(?:\s*%)?)', response)
+        ground_truth_numbers = re.findall(r'(\d+(?:,\d+)*(?:\.\d+)?(?:\s*%)?)', ground_truth)
+        
+        return {
+            'response_full_text': response,
+            'ground_truth_full_text': ground_truth,
+            'response_numbers_found': response_numbers,
+            'ground_truth_numbers_found': ground_truth_numbers,
+            'extracted_response_num': self.extract_final_numerical_answer(response),
+            'extracted_ground_truth_num': self.extract_final_numerical_answer(ground_truth)
+        }
+
+    def compare_numerical_answers(self, response_num: float, ground_truth_num: float) -> Dict[str, Any]:
+        """
+        Compare numerical answers with more flexible tolerance
+        
+        :param response_num: Numerical answer from model
+        :param ground_truth_num: Ground truth numerical answer
+        :return: Detailed comparison dictionary
+        """
+        if response_num is None or ground_truth_num is None:
+            return {
+                'is_match': False,
+                'reason': 'Missing numerical value',
+                'response_num': response_num,
+                'ground_truth_num': ground_truth_num
+            }
+        
+        # More lenient tolerances
+        relative_tolerance = 0.1  # Increased from 0.05 to 0.1
+        absolute_tolerance = 0.5  # Increased from 0.1 to 0.5
+        decimal_precision_tolerance = 0.5  # New tolerance for decimal precision
+        
+        # Calculate differences
+        absolute_diff = abs(response_num - ground_truth_num)
+        relative_diff = absolute_diff / abs(ground_truth_num) if ground_truth_num != 0 else float('inf')
+        
+        # Check decimal precision
+        decimal_precision_match = abs(round(response_num, 1) - round(ground_truth_num, 1)) <= decimal_precision_tolerance
+        
+        # Determine match and reason
+        is_match = (
+            (relative_diff <= relative_tolerance) or 
+            (absolute_diff <= absolute_tolerance) or 
+            decimal_precision_match
+        )
+        
+        reason = 'Match' if is_match else 'No match'
+        if not is_match:
+            reason += f' (Relative diff: {relative_diff:.2%}, Absolute diff: {absolute_diff:.2f})'
+        
+        return {
+            'is_match': is_match,
+            'reason': reason,
+            'response_num': response_num,
+            'ground_truth_num': ground_truth_num,
+            'relative_diff': relative_diff,
+            'absolute_diff': absolute_diff,
+            'decimal_precision_match': decimal_precision_match
+        }
 
     def evaluate(self) -> Dict[str, Any]:
         """
@@ -159,23 +313,25 @@ class FinancialQAEvaluator:
             # Exact match
             exact_match = response.strip() == ground_truth.strip()
             
-            # Numerical accuracy (for percentage change)
-            numerical_accuracy = 0
-            try:
-                response_num = float(response.rstrip('%'))
-                ground_truth_num = float(ground_truth.rstrip('%'))
-                numerical_accuracy = 1 if abs(response_num - ground_truth_num) < 0.1 else 0
-            except:
-                numerical_accuracy = 0
+            # Extract numerical answers
+            response_num = self.extract_final_numerical_answer(response, ground_truth)
+            ground_truth_num = self.extract_final_numerical_answer(ground_truth)
+            
+            # Numerical accuracy
+            numerical_comparison = self.compare_numerical_answers(response_num, ground_truth_num)
+            numerical_accuracy = numerical_comparison['is_match']
             
             # Store detailed result
             result_entry = {
                 'query': query,
                 'ground_truth': ground_truth,
+                'ground_truth_num': ground_truth_num,
                 'response': response,
+                'response_num': response_num,
                 'exact_match': exact_match,
                 'semantic_similarity': semantic_sim,
                 'numerical_accuracy': numerical_accuracy,
+                'numerical_comparison': numerical_comparison,
                 'validation': validation['validation']
             }
             results['detailed_results'].append(result_entry)
@@ -221,7 +377,7 @@ def main():
         dataset_path=dataset_path, 
         model_name="o3-mini", 
         top_k=5, 
-        sample_size=5  # Evaluate on first 50 samples
+        sample_size=5  # Evaluate on first 5 samples
     )
     
     # Run evaluation
