@@ -205,6 +205,10 @@ This is where the fun began! Added query expansion (because context is everythin
 **Day 4: The "Truth Time" Phase 📊**
 Evaluation day! Considered going with ROUGE/BLEU but realized they're not great for numbers. Went with MAE/RMSE instead - because when you're dealing with percentages, being off by 0.1 or 10 makes a huge difference! Added all the logging because, well, debugging financial calculations is fun (said no one ever).
 
+🚨 **Warning!** 🚨 
+
+I owe a huge shout-out to my AI sidekick, Claude Sonnet 3.7, for assisting me build the repo and debug like a pro! If you find any bugs or errors in my code, just remember: it's all Claude's fault! 😂 , Just kidding, I had my hands on most of core places and cleaned it up finally, Because most of the time, it couldn't understand the numerical reasoning part, vector db ingestion was poor, conflicting packages and dataset part, it was like a fight in a time loop! But seriously, any mistakes are mine—Claude just provided the caffeine! ☕️
+
 ### Development Decisions
 
 1. Infrastructure Choices:
@@ -225,12 +229,8 @@ Evaluation day! Considered going with ROUGE/BLEU but realized they're not great 
 
 ## Interactive Dashboard
 
-The project includes a Streamlit dashboard (`app/dashboard.py`) that provides:
-- Visual exploration of the dataset
-- Interactive QA testing interface
-- Performance metrics visualization
-- Error analysis tools
-- Real-time model response inspection
+The project includes a Streamlit dashboard (`app/dashboard.py`) that provides EDA of the dataset
+
 
 ## Key Features
 
@@ -249,7 +249,7 @@ The project includes a Streamlit dashboard (`app/dashboard.py`) that provides:
 
 3. Development Tools
    - Streamlit dashboard for data exploration
-   - Comprehensive logging system
+   - Comprehensive logging system ( only for `evaluate.py`)
    - Detailed error analysis
    - Performance monitoring
 
