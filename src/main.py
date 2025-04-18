@@ -379,13 +379,14 @@ CRITICAL INSTRUCTIONS:
 - For financial ratios, clearly state the formula used
 
 FINAL ANSWER FORMAT:
-After your detailed reasoning, you MUST end your response with a line that says "FINAL ANSWER:" followed by ONLY the numerical result (with % or $ if appropriate). 
+After your detailed reasoning, you MUST end your response with a line that says "FINAL ANSWER:" followed by ONLY the numerical result (with or without % 'if appropriate). 
 For example: "FINAL ANSWER: 42.5%" or "FINAL ANSWER: -21.1%" or "FINAL ANSWER: 1000000"
 The out put should not have millions or billions or currency appended to the answer FINAL ANSWER:, just the number.
 For example bad answers are "FINAL ANSWER: $1,000,000" or "FINAL ANSWER: 1 million" or "FINAL ANSWER: 1 billion"
 Be sure to include the negative sign (-) for negative percentages or values.
 Do not include any additional text, explanations, or context after the FINAL ANSWER line.
 This format is critical for automated evaluation.
+
 """
     
     return ChatPromptTemplate.from_template(template)

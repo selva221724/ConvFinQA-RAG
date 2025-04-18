@@ -3,6 +3,10 @@ import json
 import numpy as np
 from typing import List, Dict, Any
 import re
+import logging
+import time
+from tqdm import tqdm
+
 
 # Import modules from main.py and utills.py
 from main import (
@@ -22,11 +26,9 @@ from utills import (
 # LangChain and OpenAI imports
 from langchain.schema import Document
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from langchain_community.vectorstores import FAISS
 from langchain.chains import RetrievalQA
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-
+from langchain_pinecone import Pinecone
+import pinecone
 
 import ssl
 
@@ -39,7 +41,18 @@ except AttributeError:
 else:
     # For newer Python versions
     ssl._create_default_https_context = _create_unverified_https_context
-    
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("evaluation.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("FinancialQAEvaluator")
+
 class FinancialQAEvaluator:
     def __init__(self, 
                  dataset_path: str, 
@@ -54,14 +67,9 @@ class FinancialQAEvaluator:
         :param top_k: Number of documents to retrieve
         :param sample_size: Number of samples to evaluate (None = full dataset)
         """
-        # Logging setup
-        self.log_messages = []
-
-        def log(message):
-            print(message)
-            self.log_messages.append(message)
-
         try:
+            logger.info(f"Initializing evaluator with model: {model_name}, top_k: {top_k}")
+            
             # Load and process dataset
             self.documents = convert_convfinqa_to_documents(dataset_path)
             self.qa_pairs = create_qa_pairs(dataset_path)
@@ -70,7 +78,7 @@ class FinancialQAEvaluator:
             if sample_size:
                 self.qa_pairs = self.qa_pairs[:sample_size]
             
-            log(f"Loaded {len(self.qa_pairs)} QA pairs")
+            logger.info(f"Loaded {len(self.qa_pairs)} QA pairs")
             
             # Process documents
             text_splitter = NumericalTextSplitter(chunk_size=384, chunk_overlap=64)
@@ -81,8 +89,30 @@ class FinancialQAEvaluator:
             self.processed_docs = advanced_table_parser.process_documents(split_docs)
             
             # Set up vector store
-            embeddings = OpenAIEmbeddings()
-            self.vectorstore = FAISS.from_documents(self.processed_docs, embeddings)
+            embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+            
+            pinecone_api_key = os.environ.get("PINECONE_API_KEY")
+            pinecone_index_name = os.environ.get("PINECONE_INDEX", "convfinqa")
+            
+            if not pinecone_api_key:
+                raise ValueError("PINECONE_API_KEY not found in environment variables")
+            
+            logger.info(f"Connecting to existing Pinecone index: {pinecone_index_name}")
+            
+            # Initialize Pinecone with the direct approach that works
+            pc = pinecone.Pinecone(api_key=pinecone_api_key)
+            index = pc.Index(pinecone_index_name)
+            logger.info(f"Successfully connected to Pinecone index: {pinecone_index_name}")
+            
+            # Initialize embeddings
+            embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+            
+            # Create Pinecone vector store
+            self.vectorstore = Pinecone(
+                index=index,
+                embedding=embeddings,
+                text_key="text"
+            )
             
             # Create base retriever
             self.base_retriever = self.vectorstore.as_retriever(search_kwargs={"k": top_k})
@@ -90,13 +120,12 @@ class FinancialQAEvaluator:
             # Set up cross-encoder reranker
             self.reranker = None
             try:
-                from utills import CrossEncoderReranker
                 self.reranker = CrossEncoderReranker("Alibaba-NLP/gte-multilingual-reranker-base", trust_remote_code=True)
-                log("Advanced reranker initialized successfully")
+                logger.info("Advanced reranker initialized successfully")
             except ImportError as e:
-                log(f"Warning: Advanced reranking disabled. Error: {e}")
+                logger.warning(f"Advanced reranking disabled. Error: {e}")
             except Exception as e:
-                log(f"Unexpected error setting up reranker: {e}")
+                logger.warning(f"Unexpected error setting up reranker: {e}")
             
             # Set up multi-stage retriever with fallback
             try:
@@ -106,9 +135,9 @@ class FinancialQAEvaluator:
                     reranker=self.reranker,
                     top_k=top_k
                 )
-                log("Multi-stage retriever initialized successfully")
+                logger.info("Multi-stage retriever initialized successfully")
             except Exception as e:
-                log(f"Fallback to basic retriever due to: {e}")
+                logger.warning(f"Fallback to basic retriever due to: {e}")
                 self.multi_stage_retriever = self.base_retriever
             
             # Initialize query expander
@@ -129,36 +158,11 @@ class FinancialQAEvaluator:
             # Initialize response validator
             self.validator = NumericalResponseValidator()
             
-            # Initialize TF-IDF vectorizer
-            self.vectorizer = TfidfVectorizer()
-            
-            log("Evaluation system initialized successfully")
+            logger.info("Evaluation system initialized successfully")
         
         except Exception as e:
-            log(f"Critical initialization error: {e}")
+            logger.error(f"Critical initialization error: {e}", exc_info=True)
             raise
-
-    def compute_semantic_similarity(self, response: str, ground_truth: str) -> float:
-        """
-        Compute semantic similarity between response and ground truth using TF-IDF
-        
-        :param response: Model's response
-        :param ground_truth: Expected answer
-        :return: Semantic similarity score
-        """
-        try:
-            # Combine texts to create vocabulary
-            corpus = [response, ground_truth]
-            
-            # Fit and transform
-            tfidf_matrix = self.vectorizer.fit_transform(corpus)
-            
-            # Compute cosine similarity
-            similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-            return float(similarity)
-        except Exception as e:
-            print(f"Semantic similarity computation error: {e}")
-            return 0.0
 
     def extract_final_numerical_answer(self, response: str, ground_truth: str = None) -> float:
         """
@@ -168,13 +172,8 @@ class FinancialQAEvaluator:
         :param ground_truth: Optional ground truth to provide context
         :return: Extracted numerical value
         """
-        import re
-        
         # First check for "FINAL ANSWER:" format (from chain-of-thought implementation)
         final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', response)
-        
-        print("Response: ", response)
-        print("---"*50)
         
         if final_answer_match:
             final_answer = final_answer_match.group(1)
@@ -200,9 +199,18 @@ class FinancialQAEvaluator:
             except ValueError:
                 pass
         
-        # Fallback to original extraction method if FINAL ANSWER format not found
-        # Enhanced regex to capture more numerical formats
+        # Enhanced regex patterns to capture more numerical formats
         number_patterns = [
+            # Look for specific calculation result patterns
+            r'(?:approximately|about|roughly|≈|~)\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)',
+            # Look for "is X%" or "was X%" patterns
+            r'(?:is|was|of)\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)',
+            # Look for result statements
+            r'(?:result|answer|calculation|equals|equal to)\s*(?:is|was)?\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)',
+            # Look for percentage increase/decrease patterns
+            r'(?:increased|decreased|changed|grew|declined|rose|fell)(?:\s+by)?\s+([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)',
+            # Look for ratio patterns
+            r'(?:ratio|proportion|factor)\s+(?:of|is|was|equals|equal to)?\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?(?:\s*:\s*1)?)',
             # Percentage with optional space
             r'([-+]?\d+(?:,\d+)*(?:\.\d+)?)\s*%',
             # Decimal numbers with optional commas
@@ -232,47 +240,33 @@ class FinancialQAEvaluator:
                 # Take the last number, remove commas, and convert to float
                 final_number_str = numbers[-1].replace(',', '')
                 
+                # Remove currency symbols and percentage signs
+                final_number_str = final_number_str.replace('$', '').replace('%', '')
+                
+                # Handle ratio format (e.g., "4:1")
+                if ':' in final_number_str:
+                    parts = final_number_str.split(':')
+                    if len(parts) == 2 and parts[1] == '1':
+                        final_number_str = parts[0]
+                
                 try:
                     extracted_num = float(final_number_str)
                     
                     # Additional validation for percentage-like numbers
-                    if ground_truth and '%' in ground_truth:
-                        # Ensure extracted number is reasonable for a percentage
-                        if 0 <= abs(extracted_num) <= 200:
-                            return extracted_num
-                    else:
-                        return extracted_num
+                    if ground_truth and '%' in ground_truth and not ('-' in ground_truth and '-' in final_number_str):
+                        # If ground truth is negative percentage but extracted isn't, make it negative
+                        if '-' in ground_truth and not '-' in final_number_str:
+                            extracted_num = -extracted_num
+                    
+                    return extracted_num
                 except ValueError:
                     continue
         
         return None
 
-    def debug_numerical_extraction(self, response: str, ground_truth: str) -> Dict[str, Any]:
-        """
-        Provide detailed debugging information for numerical extraction
-        
-        :param response: Model's response
-        :param ground_truth: Ground truth answer
-        :return: Debugging information dictionary
-        """
-        import re
-        
-        # Extract all numbers from response and ground truth
-        response_numbers = re.findall(r'(\d+(?:,\d+)*(?:\.\d+)?(?:\s*%)?)', response)
-        ground_truth_numbers = re.findall(r'(\d+(?:,\d+)*(?:\.\d+)?(?:\s*%)?)', ground_truth)
-        
-        return {
-            'response_full_text': response,
-            'ground_truth_full_text': ground_truth,
-            'response_numbers_found': response_numbers,
-            'ground_truth_numbers_found': ground_truth_numbers,
-            'extracted_response_num': self.extract_final_numerical_answer(response),
-            'extracted_ground_truth_num': self.extract_final_numerical_answer(ground_truth)
-        }
-
     def compare_numerical_answers(self, response_num: float, ground_truth_num: float) -> Dict[str, Any]:
         """
-        Compare numerical answers with more flexible tolerance
+        Compare numerical answers with flexible tolerance
         
         :param response_num: Numerical answer from model
         :param ground_truth_num: Ground truth numerical answer
@@ -286,17 +280,42 @@ class FinancialQAEvaluator:
                 'ground_truth_num': ground_truth_num
             }
         
-        # More lenient tolerances
-        relative_tolerance = 0.1  # Increased from 0.05 to 0.1
-        absolute_tolerance = 0.5  # Increased from 0.1 to 0.5
-        decimal_precision_tolerance = 0.5  # New tolerance for decimal precision
+        # Tolerances for different value ranges
+        if abs(ground_truth_num) < 1:
+            relative_tolerance = 0.2  # 20% for small numbers
+            absolute_tolerance = 0.1  # 0.1 absolute difference for small numbers
+        elif abs(ground_truth_num) < 10:
+            relative_tolerance = 0.15  # 15% for medium numbers
+            absolute_tolerance = 0.5  # 0.5 absolute difference for medium numbers
+        else:
+            relative_tolerance = 0.1  # 10% for large numbers
+            absolute_tolerance = 1.0  # 1.0 absolute difference for large numbers
+        
+        # Special case for percentages
+        if abs(ground_truth_num) <= 100 and abs(response_num) <= 100:
+            # For percentage values, be more lenient
+            decimal_precision_tolerance = 1.0  # Allow 1 percentage point difference
+        else:
+            decimal_precision_tolerance = abs(ground_truth_num) * 0.05  # 5% of the ground truth value
+        
+        # Handle sign differences for percentages
+        # If one is negative and one is positive, but their absolute values are close
+        if (ground_truth_num < 0 and response_num > 0) or (ground_truth_num > 0 and response_num < 0):
+            # Check if the absolute values are close
+            if abs(abs(ground_truth_num) - abs(response_num)) <= absolute_tolerance:
+                return {
+                    'is_match': False,
+                    'reason': 'Sign mismatch but absolute values are close',
+                    'response_num': response_num,
+                    'ground_truth_num': ground_truth_num
+                }
         
         # Calculate differences
         absolute_diff = abs(response_num - ground_truth_num)
         relative_diff = absolute_diff / abs(ground_truth_num) if ground_truth_num != 0 else float('inf')
         
         # Check decimal precision
-        decimal_precision_match = abs(round(response_num, 1) - round(ground_truth_num, 1)) <= decimal_precision_tolerance
+        decimal_precision_match = absolute_diff <= decimal_precision_tolerance
         
         # Determine match and reason
         is_match = (
@@ -319,62 +338,34 @@ class FinancialQAEvaluator:
             'decimal_precision_match': decimal_precision_match
         }
 
-    def calculate_precision_recall_f1(self, retrieved_docs: List[Document], relevant_docs: List[str]) -> Dict[str, float]:
+    def calculate_retrieval_metrics(self, retrieved_docs: List[Document], document_id: str) -> Dict[str, float]:
         """
-        Calculate precision, recall, and F1 score for retrieved documents
+        Calculate retrieval metrics (precision, recall, F1, MRR, NDCG)
         
         :param retrieved_docs: List of retrieved documents
-        :param relevant_docs: List of relevant document IDs
-        :return: Dictionary with precision, recall, and F1 metrics
+        :param document_id: ID of the relevant document
+        :return: Dictionary with retrieval metrics
         """
         # Extract IDs from retrieved documents
         retrieved_ids = [doc.metadata.get('id', '') for doc in retrieved_docs]
         
-        # Calculate true positives (documents that are both retrieved and relevant)
+        # Calculate precision, recall, and F1
+        relevant_docs = [document_id]
         true_positives = len(set(retrieved_ids).intersection(set(relevant_docs)))
         
-        # Calculate precision, recall, and F1
         precision = true_positives / len(retrieved_ids) if retrieved_ids else 0
         recall = true_positives / len(relevant_docs) if relevant_docs else 0
         f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         
-        return {
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1
-        }
-    
-    def calculate_mrr(self, retrieved_docs: List[Document], relevant_doc_id: str) -> float:
-        """
-        Calculate Mean Reciprocal Rank (MRR)
-        
-        :param retrieved_docs: List of retrieved documents
-        :param relevant_doc_id: ID of the relevant document
-        :return: MRR score
-        """
-        # Extract IDs from retrieved documents
-        retrieved_ids = [doc.metadata.get('id', '') for doc in retrieved_docs]
-        
-        # Find the rank of the first relevant document
+        # Calculate MRR
         try:
-            rank = retrieved_ids.index(relevant_doc_id) + 1  # +1 because ranks start at 1
-            return 1.0 / rank
+            rank = retrieved_ids.index(document_id) + 1  # +1 because ranks start at 1
+            mrr = 1.0 / rank
         except ValueError:
             # Relevant document not found in retrieved documents
-            return 0.0
-    
-    def calculate_ndcg(self, retrieved_docs: List[Document], relevant_docs: List[str]) -> float:
-        """
-        Calculate Normalized Discounted Cumulative Gain (NDCG)
+            mrr = 0.0
         
-        :param retrieved_docs: List of retrieved documents
-        :param relevant_docs: List of relevant document IDs
-        :return: NDCG score
-        """
-        # Extract IDs from retrieved documents
-        retrieved_ids = [doc.metadata.get('id', '') for doc in retrieved_docs]
-        
-        # Calculate DCG
+        # Calculate NDCG
         dcg = 0
         for i, doc_id in enumerate(retrieved_ids):
             # Relevance is binary (1 if relevant, 0 if not)
@@ -383,13 +374,19 @@ class FinancialQAEvaluator:
             dcg += relevance / np.log2(i + 2)  # i+2 because i starts at 0 and log2(1) is 0
         
         # Calculate IDCG (ideal DCG)
-        # In the ideal case, all relevant documents come first
         idcg = 0
         for i in range(min(len(relevant_docs), len(retrieved_ids))):
             idcg += 1 / np.log2(i + 2)
         
-        # Calculate NDCG
-        return dcg / idcg if idcg > 0 else 0
+        ndcg = dcg / idcg if idcg > 0 else 0
+        
+        return {
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1,
+            'mrr': mrr,
+            'ndcg': ndcg
+        }
     
     def evaluate(self) -> Dict[str, Any]:
         """
@@ -397,35 +394,28 @@ class FinancialQAEvaluator:
         
         :return: Evaluation metrics dictionary
         """
-        import time
-        from nltk.translate.bleu_score import sentence_bleu
-        from nltk.tokenize import word_tokenize
-        
-        # Try to import NLTK and download necessary data
-        try:
-            import nltk
-            nltk.download('punkt', quiet=True)
-        except:
-            print("Warning: NLTK not fully available. BLEU scores may not be calculated correctly.")
-        
         results = {
             'total_samples': len(self.qa_pairs),
             'metrics': {
-                'exact_match_accuracy': 0,
-                'semantic_similarity_avg': 0,
                 'numerical_accuracy': 0,
-                'precision_avg': 0,
-                'recall_avg': 0,
-                'f1_score_avg': 0,
-                'mrr_avg': 0,
-                'ndcg_avg': 0,
-                'bleu_score_avg': 0,
+                'numerical_accuracy_with_sign': 0,
+                'numerical_accuracy_within_1pct': 0,
+                'numerical_accuracy_within_5pct': 0,
+                'numerical_accuracy_within_10pct': 0,
+                'retrieval_precision_avg': 0,
+                'retrieval_recall_avg': 0,
+                'retrieval_f1_score_avg': 0,
+                'retrieval_mrr_avg': 0,
+                'retrieval_ndcg_avg': 0,
                 'average_latency': 0
             },
             'detailed_results': []
         }
         
         total_latency = 0
+        
+        # Create progress bar
+        pbar = tqdm(total=len(self.qa_pairs), desc="Evaluating QA pairs")
         
         for qa_pair in self.qa_pairs:
             query = qa_pair['question']
@@ -440,103 +430,100 @@ class FinancialQAEvaluator:
             retrieved_docs = self.multi_stage_retriever.get_relevant_documents(expanded_query)
             
             # Generate response
-            full_response = self.qa_chain.invoke(expanded_query)
-            # Extract content from the response object if needed
-            if hasattr(full_response, 'content'):
-                full_response = full_response.content
-            elif isinstance(full_response, dict) and 'result' in full_response:
-                full_response = full_response['result']
+            try:
+                full_response = self.qa_chain.invoke(expanded_query)
+                # Extract content from the response object if needed
+                if hasattr(full_response, 'content'):
+                    full_response = full_response.content
+                elif isinstance(full_response, dict) and 'result' in full_response:
+                    full_response = full_response['result']
+            except Exception as e:
+                logger.error(f"Error generating response: {e}")
+                full_response = "Error generating response"
             
-            # Extract just the numerical answer
-            final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', full_response)
-            if final_answer_match:
-                response = final_answer_match.group(1)
-                # Clean up the result for evaluation
-                if response.endswith('%') and not response.startswith('-') and ground_truth and ground_truth.startswith('-'):
-                    # Handle case where ground truth is negative percentage but extracted answer is positive
-                    response = '-' + response
-            else:
-                response = full_response
             end_time = time.time()
             
             # Calculate latency
             latency = end_time - start_time
             total_latency += latency
             
-            # Validate response
-            validation = self.validator.validate(query, response)
-            
-            # Compute semantic similarity
-            semantic_sim = self.compute_semantic_similarity(response, ground_truth)
-            
-            # Exact match
-            exact_match = response.strip() == ground_truth.strip()
-            
             # Extract numerical answers
-            response_num = self.extract_final_numerical_answer(response, ground_truth)
+            response_num = self.extract_final_numerical_answer(full_response, ground_truth)
             ground_truth_num = self.extract_final_numerical_answer(ground_truth)
             
             # Numerical accuracy
             numerical_comparison = self.compare_numerical_answers(response_num, ground_truth_num)
             numerical_accuracy = numerical_comparison['is_match']
             
-            # Calculate RAG metrics
-            rag_metrics = self.calculate_precision_recall_f1(retrieved_docs, [document_id])
-            mrr = self.calculate_mrr(retrieved_docs, document_id)
-            ndcg = self.calculate_ndcg(retrieved_docs, [document_id])
+            # Calculate additional numerical accuracy metrics
+            numerical_accuracy_with_sign = False
+            numerical_accuracy_within_1pct = False
+            numerical_accuracy_within_5pct = False
+            numerical_accuracy_within_10pct = False
             
-            # Calculate BLEU score
-            try:
-                reference = [word_tokenize(ground_truth.lower())]
-                candidate = word_tokenize(response.lower())
-                bleu_score = sentence_bleu(reference, candidate)
-            except:
-                bleu_score = 0
+            if response_num is not None and ground_truth_num is not None:
+                # Check if signs match
+                signs_match = (response_num >= 0 and ground_truth_num >= 0) or (response_num < 0 and ground_truth_num < 0)
+                
+                # Calculate relative difference for percentage-based metrics
+                if ground_truth_num != 0:
+                    rel_diff = abs(response_num - ground_truth_num) / abs(ground_truth_num)
+                    numerical_accuracy_with_sign = signs_match
+                    numerical_accuracy_within_1pct = rel_diff <= 0.01
+                    numerical_accuracy_within_5pct = rel_diff <= 0.05
+                    numerical_accuracy_within_10pct = rel_diff <= 0.1
             
-            # Store detailed result
+            # Calculate retrieval metrics
+            retrieval_metrics = self.calculate_retrieval_metrics(retrieved_docs, document_id)
+            
+            # Store detailed result including the full model response
             result_entry = {
                 'query': query,
                 'ground_truth': ground_truth,
                 'ground_truth_num': ground_truth_num,
-                'full_response': full_response,
-                'response': response,
+                'full_response': full_response,  # Include the full model response
                 'response_num': response_num,
-                'exact_match': exact_match,
-                'semantic_similarity': semantic_sim,
                 'numerical_accuracy': numerical_accuracy,
                 'numerical_comparison': numerical_comparison,
-                'validation': validation['validation'],
-                'rag_metrics': rag_metrics,
-                'mrr': mrr,
-                'ndcg': ndcg,
-                'bleu_score': bleu_score,
+                'numerical_accuracy_with_sign': numerical_accuracy_with_sign,
+                'numerical_accuracy_within_1pct': numerical_accuracy_within_1pct,
+                'numerical_accuracy_within_5pct': numerical_accuracy_within_5pct,
+                'numerical_accuracy_within_10pct': numerical_accuracy_within_10pct,
+                'retrieval_metrics': retrieval_metrics,
                 'latency': latency
             }
             results['detailed_results'].append(result_entry)
             
             # Update aggregate metrics
-            results['metrics']['exact_match_accuracy'] += exact_match
-            results['metrics']['semantic_similarity_avg'] += semantic_sim
             results['metrics']['numerical_accuracy'] += numerical_accuracy
-            results['metrics']['precision_avg'] += rag_metrics['precision']
-            results['metrics']['recall_avg'] += rag_metrics['recall']
-            results['metrics']['f1_score_avg'] += rag_metrics['f1_score']
-            results['metrics']['mrr_avg'] += mrr
-            results['metrics']['ndcg_avg'] += ndcg
-            results['metrics']['bleu_score_avg'] += bleu_score
+            results['metrics']['numerical_accuracy_with_sign'] += numerical_accuracy_with_sign
+            results['metrics']['numerical_accuracy_within_1pct'] += numerical_accuracy_within_1pct
+            results['metrics']['numerical_accuracy_within_5pct'] += numerical_accuracy_within_5pct
+            results['metrics']['numerical_accuracy_within_10pct'] += numerical_accuracy_within_10pct
+            results['metrics']['retrieval_precision_avg'] += retrieval_metrics['precision']
+            results['metrics']['retrieval_recall_avg'] += retrieval_metrics['recall']
+            results['metrics']['retrieval_f1_score_avg'] += retrieval_metrics['f1_score']
+            results['metrics']['retrieval_mrr_avg'] += retrieval_metrics['mrr']
+            results['metrics']['retrieval_ndcg_avg'] += retrieval_metrics['ndcg']
+            
+            # Log brief summary of each evaluation
+            logger.debug(f"Query: '{query[:50]}...' - Ground truth: {ground_truth_num} - Response: {response_num} - Match: {numerical_accuracy}")
+            
+            # Update progress bar
+            pbar.update(1)
+        
+        # Close progress bar
+        pbar.close()
         
         # Compute final metrics
         total_samples = len(self.qa_pairs)
-        results['metrics']['exact_match_accuracy'] /= total_samples
-        results['metrics']['semantic_similarity_avg'] /= total_samples
-        results['metrics']['numerical_accuracy'] /= total_samples
-        results['metrics']['precision_avg'] /= total_samples
-        results['metrics']['recall_avg'] /= total_samples
-        results['metrics']['f1_score_avg'] /= total_samples
-        results['metrics']['mrr_avg'] /= total_samples
-        results['metrics']['ndcg_avg'] /= total_samples
-        results['metrics']['bleu_score_avg'] /= total_samples
+        for metric in results['metrics']:
+            if metric != 'average_latency':
+                results['metrics'][metric] /= total_samples
+        
         results['metrics']['average_latency'] = total_latency / total_samples
+        
+        logger.info(f"Evaluation completed. Numerical accuracy: {results['metrics']['numerical_accuracy']:.2%}")
         
         return results
 
@@ -548,16 +535,37 @@ class FinancialQAEvaluator:
         """
         report_path = os.path.join(os.path.dirname(__file__), 'evaluation_report.json')
         
+        # Create a summary version for console output
+        summary_results = {
+            'total_samples': results['total_samples'],
+            'metrics': results['metrics'],
+            # Include a few examples but not all detailed results
+            'example_results': results['detailed_results'][:3] if results['detailed_results'] else []
+        }
+        
+        # Save full results to file
         with open(report_path, 'w') as f:
             json.dump(results, f, indent=4)
         
-        print("\n--- Financial QA Evaluation Report ---")
-        print(f"Total Samples: {results['total_samples']}")
-        print("\nAggregate Metrics:")
+        logger.info("\n--- Financial QA Evaluation Report ---")
+        logger.info(f"Total Samples: {results['total_samples']}")
+        logger.info("\nAggregate Metrics:")
         for metric, value in results['metrics'].items():
-            print(f"{metric.replace('_', ' ').title()}: {value * 100:.2f}%")
+            if metric == 'average_latency':
+                logger.info(f"{metric.replace('_', ' ').title()}: {value:.2f} seconds")
+            else:
+                logger.info(f"{metric.replace('_', ' ').title()}: {value * 100:.2f}%")
         
-        print(f"\nDetailed report saved to {report_path}")
+        # Log a few example results
+        if results['detailed_results']:
+            logger.info("\nExample Query Result:")
+            example = results['detailed_results'][0]
+            logger.info(f"Query: {example['query']}")
+            logger.info(f"Ground Truth: {example['ground_truth']} ({example['ground_truth_num']})")
+            logger.info(f"Response Number: {example['response_num']}")
+            logger.info(f"Match: {example['numerical_accuracy']} ({example['numerical_comparison']['reason']})")
+        
+        logger.info(f"\nDetailed report saved to {report_path}")
 
 def main():
     # Path to the dataset
@@ -567,7 +575,7 @@ def main():
     evaluator = FinancialQAEvaluator(
         dataset_path=dataset_path, 
         model_name="o3-mini", 
-        top_k=5, 
+        top_k=10, 
         sample_size=5  # Evaluate on first 5 samples
     )
     
