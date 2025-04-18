@@ -107,7 +107,7 @@ The project follows a modular structure with clear separation of concerns:
   pinecone-client
   streamlit
   beautifulsoup4
-  sentence-transformers (optional, for reranking)
+  sentence-transformers (optional, for cross encoder reranking)
   ```
 
 ## Quick Start
@@ -200,7 +200,7 @@ I spent the first day just wrapping my head around financial data. Tables everyw
 Decided to go with Pinecone for the vector DB - didn't want to waste time setting up local alternatives. Grabbed OpenAI's endpoints because they're reliable and cost-effective. First RAG pipeline was... let's say "numerically challenged" 😅 But after some custom table parsing and chunking magic, things started looking up.
 
 **Day 3: The "Making It Smart" Phase 💡**
-This is where the fun began! Added query expansion (because context is everything), implemented two-stage answer generation (like a math teacher: show your work, then give the answer), and made sure our tables didn't turn into spaghetti. The vector DB started actually understanding what numbers meant!
+This is where the fun began! Added query expansion (because context is everything), implemented two-stage answer generation (like a math teacher: show your work, then give the answer), and made sure our tables didn't turn into spaghetti. The vector DB started actually understanding what numbers meant! 
 
 **Day 4: The "Truth Time" Phase 📊**
 Evaluation day! Considered going with ROUGE/BLEU but realized they're not great for numbers. Went with MAE/RMSE instead - because when you're dealing with percentages, being off by 0.1 or 10 makes a huge difference! Added all the logging because, well, debugging financial calculations is fun (said no one ever).
@@ -208,6 +208,8 @@ Evaluation day! Considered going with ROUGE/BLEU but realized they're not great 
 🚨 **Warning!** 🚨 
 
 I owe a huge shout-out to my AI sidekick, Claude Sonnet 3.7, for assisting me build the repo and debug like a pro! If you find any bugs or errors in my code, just remember: it's all Claude's fault! 😂 , Just kidding, I had my hands on most of core places and cleaned it up finally, Because most of the time, it couldn't understand the numerical reasoning part, vector db ingestion was poor, conflicting packages and dataset part, it was like a fight in a time loop! But seriously, any mistakes are mine—Claude just provided the caffeine! ☕️
+
+![Python](https://img.shields.io/badge/python-3.11-blue.svg)
 
 ### Development Decisions
 
@@ -279,3 +281,5 @@ Financial data needs proper handling - would add PII detection, proper GDPR comp
 - **LinkedIn:** [Tamil Selvan](https://www.linkedin.com/in/selva221724/)
 - **GitHub:** [selva221724](https://github.com/selva221724)
 - **Stack Overflow:** [Tamil Selvan](https://stackoverflow.com/users/10383650/tamil-selvan)
+
+
