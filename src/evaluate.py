@@ -148,11 +148,19 @@ class FinancialQAEvaluator:
                 model_name=model_name
             )
             
-            # Create QA chain
-            self.qa_chain = RetrievalQA.from_chain_type(
+            # Import prompts from main
+            from main import create_reasoning_prompt_template, create_answer_extraction_prompt_template
+            
+            # Initialize the chains with their respective prompts
+            self.reasoning_prompt = create_reasoning_prompt_template()
+            self.extraction_prompt = create_answer_extraction_prompt_template()
+            
+            # Create reasoning chain
+            self.reasoning_chain = RetrievalQA.from_chain_type(
                 llm=self.llm,
                 chain_type="stuff",
-                retriever=self.base_retriever
+                retriever=self.base_retriever,
+                chain_type_kwargs={"prompt": self.reasoning_prompt}
             )
             
             # Initialize response validator
@@ -164,229 +172,134 @@ class FinancialQAEvaluator:
             logger.error(f"Critical initialization error: {e}", exc_info=True)
             raise
 
-    def extract_final_numerical_answer(self, response: str, ground_truth: str = None) -> float:
+    def extract_answer(self, response: str, ground_truth: str = None) -> Dict[str, Any]:
         """
-        Extract the final numerical answer from a response with context-aware extraction
+        Extract the final answer from a response, handling both numerical and yes/no answers
         
         :param response: Full response text
         :param ground_truth: Optional ground truth to provide context
-        :return: Extracted numerical value
+        :return: Dictionary containing answer type and value
         """
-        # First check for "FINAL ANSWER:" format (from chain-of-thought implementation)
-        final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', response)
+        # Clean up the response by removing "FINAL ANSWER:" prefix if present
+        response = response.strip().lower()
+        if response.startswith('final answer:'):
+            response = response[len('final answer:'):].strip()
         
-        if final_answer_match:
-            final_answer = final_answer_match.group(1)
-            # Clean the extracted answer
-            final_answer = final_answer.replace(',', '')
-            # Handle percentage
-            if '%' in final_answer:
-                final_answer = final_answer.replace('%', '')
-                try:
-                    return float(final_answer)
-                except ValueError:
-                    pass
-            # Handle currency
-            if '$' in final_answer:
-                final_answer = final_answer.replace('$', '')
-                try:
-                    return float(final_answer)
-                except ValueError:
-                    pass
-            # Handle plain number
-            try:
-                return float(final_answer)
-            except ValueError:
-                pass
+        # Check for yes/no answer
+        if response in ['yes', 'no']:
+            return {
+                'type': 'boolean',
+                'value': response
+            }
         
-        # Enhanced regex patterns to capture more numerical formats
-        number_patterns = [
-            # Look for specific calculation result patterns
-            r'(?:approximately|about|roughly|≈|~)\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)',
-            # Look for "is X%" or "was X%" patterns
-            r'(?:is|was|of)\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)',
-            # Look for result statements
-            r'(?:result|answer|calculation|equals|equal to)\s*(?:is|was)?\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)',
-            # Look for percentage increase/decrease patterns
-            r'(?:increased|decreased|changed|grew|declined|rose|fell)(?:\s+by)?\s+([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)',
-            # Look for ratio patterns
-            r'(?:ratio|proportion|factor)\s+(?:of|is|was|equals|equal to)?\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?(?:\s*:\s*1)?)',
-            # Percentage with optional space
-            r'([-+]?\d+(?:,\d+)*(?:\.\d+)?)\s*%',
-            # Decimal numbers with optional commas
-            r'([-+]?\d+(?:,\d+)*(?:\.\d+)?)',
-            # Whole numbers with optional commas
-            r'([-+]?\d+(?:,\d+)*)'
-        ]
+        # Clean up numerical response
+        response = response.replace(',', '')  # Remove commas
+        response = response.replace('$', '')  # Remove dollar signs
         
-        # Context-aware extraction
-        if ground_truth and '%' in ground_truth:
-            # Prioritize percentage extraction if ground truth is a percentage
-            percentage_pattern = r'([-+]?\d+(?:,\d+)*(?:\.\d+)?)\s*%'
-            numbers = re.findall(percentage_pattern, response)
-            
-            if numbers:
-                final_number_str = numbers[-1].replace(',', '')
-                try:
-                    return float(final_number_str)
-                except ValueError:
-                    pass
-        
-        # Try each pattern in order
-        for pattern in number_patterns:
-            numbers = re.findall(pattern, response)
-            
-            if numbers:
-                # Take the last number, remove commas, and convert to float
-                final_number_str = numbers[-1].replace(',', '')
-                
-                # Remove currency symbols and percentage signs
-                final_number_str = final_number_str.replace('$', '').replace('%', '')
-                
-                # Handle ratio format (e.g., "4:1")
-                if ':' in final_number_str:
-                    parts = final_number_str.split(':')
-                    if len(parts) == 2 and parts[1] == '1':
-                        final_number_str = parts[0]
-                
-                try:
-                    extracted_num = float(final_number_str)
-                    
-                    # Additional validation for percentage-like numbers
-                    if ground_truth and '%' in ground_truth and not ('-' in ground_truth and '-' in final_number_str):
-                        # If ground truth is negative percentage but extracted isn't, make it negative
-                        if '-' in ground_truth and not '-' in final_number_str:
-                            extracted_num = -extracted_num
-                    
-                    return extracted_num
-                except ValueError:
-                    continue
-        
-        return None
+        # Try to extract a number
+        try:
+            # If it's a percentage, handle it
+            if '%' in response:
+                num = float(response.replace('%', ''))
+                return {
+                    'type': 'number',
+                    'value': num
+                }
+            # Otherwise, try to convert directly to float
+            return {
+                'type': 'number',
+                'value': float(response)
+            }
+        except ValueError:
+            return {
+                'type': 'unknown',
+                'value': None
+            }
 
-    def compare_numerical_answers(self, response_num: float, ground_truth_num: float) -> Dict[str, Any]:
+    def compare_answers(self, response: Dict[str, Any], ground_truth: str) -> Dict[str, Any]:
         """
-        Compare numerical answers with flexible tolerance
+        Compare numerical answers with rounding comparison
         
         :param response_num: Numerical answer from model
         :param ground_truth_num: Ground truth numerical answer
         :return: Detailed comparison dictionary
         """
-        if response_num is None or ground_truth_num is None:
+        # Extract ground truth answer
+        ground_truth_answer = self.extract_answer(ground_truth)
+        
+        # If types don't match, it's not correct
+        if response['type'] != ground_truth_answer['type']:
             return {
                 'is_match': False,
-                'reason': 'Missing numerical value',
-                'response_num': response_num,
-                'ground_truth_num': ground_truth_num
+                'reason': 'Answer type mismatch',
+                'response': response,
+                'ground_truth': ground_truth_answer
             }
         
-        # Tolerances for different value ranges
-        if abs(ground_truth_num) < 1:
-            relative_tolerance = 0.2  # 20% for small numbers
-            absolute_tolerance = 0.1  # 0.1 absolute difference for small numbers
-        elif abs(ground_truth_num) < 10:
-            relative_tolerance = 0.15  # 15% for medium numbers
-            absolute_tolerance = 0.5  # 0.5 absolute difference for medium numbers
-        else:
-            relative_tolerance = 0.1  # 10% for large numbers
-            absolute_tolerance = 1.0  # 1.0 absolute difference for large numbers
+        # Handle yes/no answers
+        if response['type'] == 'boolean':
+            is_match = response['value'] == ground_truth_answer['value']
+            return {
+                'is_match': is_match,
+                'reason': 'Exact match' if is_match else 'No match',
+                'response': response,
+                'ground_truth': ground_truth_answer
+            }
         
-        # Special case for percentages
-        if abs(ground_truth_num) <= 100 and abs(response_num) <= 100:
-            # For percentage values, be more lenient
-            decimal_precision_tolerance = 1.0  # Allow 1 percentage point difference
-        else:
-            decimal_precision_tolerance = abs(ground_truth_num) * 0.05  # 5% of the ground truth value
-        
-        # Handle sign differences for percentages
-        # If one is negative and one is positive, but their absolute values are close
-        if (ground_truth_num < 0 and response_num > 0) or (ground_truth_num > 0 and response_num < 0):
-            # Check if the absolute values are close
-            if abs(abs(ground_truth_num) - abs(response_num)) <= absolute_tolerance:
+        # Handle numerical answers
+        if response['type'] == 'number':
+            response_num = response['value']
+            ground_truth_num = ground_truth_answer['value']
+            
+            # Round both numbers to 1 decimal place for comparison
+            response_rounded = round(response_num, 1)
+            ground_truth_rounded = round(ground_truth_num, 1)
+            
+            # Check if they match after rounding
+            if response_rounded == ground_truth_rounded:
                 return {
-                    'is_match': False,
-                    'reason': 'Sign mismatch but absolute values are close',
-                    'response_num': response_num,
-                    'ground_truth_num': ground_truth_num
+                    'is_match': True,
+                    'reason': 'Match after rounding to 1 decimal place',
+                    'response': response,
+                    'ground_truth': ground_truth_answer,
+                    'response_rounded': response_rounded,
+                    'ground_truth_rounded': ground_truth_rounded
                 }
-        
-        # Calculate differences
-        absolute_diff = abs(response_num - ground_truth_num)
-        relative_diff = absolute_diff / abs(ground_truth_num) if ground_truth_num != 0 else float('inf')
-        
-        # Check decimal precision
-        decimal_precision_match = absolute_diff <= decimal_precision_tolerance
-        
-        # Determine match and reason
-        is_match = (
-            (relative_diff <= relative_tolerance) or 
-            (absolute_diff <= absolute_tolerance) or 
-            decimal_precision_match
-        )
-        
-        reason = 'Match' if is_match else 'No match'
-        if not is_match:
-            reason += f' (Relative diff: {relative_diff:.2%}, Absolute diff: {absolute_diff:.2f})'
+            
+            # If they don't match after rounding to 1 decimal, try rounding to whole number
+            response_whole = round(response_num)
+            ground_truth_whole = round(ground_truth_num)
+            
+            if response_whole == ground_truth_whole:
+                return {
+                    'is_match': True,
+                    'reason': 'Match after rounding to whole number',
+                    'response': response,
+                    'ground_truth': ground_truth_answer,
+                    'response_rounded': response_whole,
+                    'ground_truth_rounded': ground_truth_whole
+                }
+            
+            # Calculate percentage difference for close matches
+            if ground_truth_num != 0:
+                percent_diff = abs((response_num - ground_truth_num) / ground_truth_num) * 100
+                if percent_diff <= 1:  # Within 1% difference
+                    return {
+                        'is_match': True,
+                        'reason': f'Within 1% difference ({percent_diff:.2f}%)',
+                        'response': response,
+                        'ground_truth': ground_truth_answer,
+                        'percent_diff': percent_diff
+                    }
         
         return {
-            'is_match': is_match,
-            'reason': reason,
-            'response_num': response_num,
-            'ground_truth_num': ground_truth_num,
-            'relative_diff': relative_diff,
-            'absolute_diff': absolute_diff,
-            'decimal_precision_match': decimal_precision_match
+            'is_match': False,
+            'reason': 'No match',
+            'response': response,
+            'ground_truth': ground_truth_answer
         }
 
-    def calculate_retrieval_metrics(self, retrieved_docs: List[Document], document_id: str) -> Dict[str, float]:
-        """
-        Calculate retrieval metrics (precision, recall, F1, MRR, NDCG)
-        
-        :param retrieved_docs: List of retrieved documents
-        :param document_id: ID of the relevant document
-        :return: Dictionary with retrieval metrics
-        """
-        # Extract IDs from retrieved documents
-        retrieved_ids = [doc.metadata.get('id', '') for doc in retrieved_docs]
-        
-        # Calculate precision, recall, and F1
-        relevant_docs = [document_id]
-        true_positives = len(set(retrieved_ids).intersection(set(relevant_docs)))
-        
-        precision = true_positives / len(retrieved_ids) if retrieved_ids else 0
-        recall = true_positives / len(relevant_docs) if relevant_docs else 0
-        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-        
-        # Calculate MRR
-        try:
-            rank = retrieved_ids.index(document_id) + 1  # +1 because ranks start at 1
-            mrr = 1.0 / rank
-        except ValueError:
-            # Relevant document not found in retrieved documents
-            mrr = 0.0
-        
-        # Calculate NDCG
-        dcg = 0
-        for i, doc_id in enumerate(retrieved_ids):
-            # Relevance is binary (1 if relevant, 0 if not)
-            relevance = 1 if doc_id in relevant_docs else 0
-            # DCG formula: rel_i / log2(i+2)
-            dcg += relevance / np.log2(i + 2)  # i+2 because i starts at 0 and log2(1) is 0
-        
-        # Calculate IDCG (ideal DCG)
-        idcg = 0
-        for i in range(min(len(relevant_docs), len(retrieved_ids))):
-            idcg += 1 / np.log2(i + 2)
-        
-        ndcg = dcg / idcg if idcg > 0 else 0
-        
-        return {
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1,
-            'mrr': mrr,
-            'ndcg': ndcg
-        }
+
     
     def evaluate(self) -> Dict[str, Any]:
         """
@@ -398,15 +311,15 @@ class FinancialQAEvaluator:
             'total_samples': len(self.qa_pairs),
             'metrics': {
                 'numerical_accuracy': 0,
+                'boolean_accuracy': 0,  # For yes/no answers
+                'total_numerical': 0,   # Count of numerical questions
+                'total_boolean': 0,     # Count of yes/no questions
                 'numerical_accuracy_with_sign': 0,
                 'numerical_accuracy_within_1pct': 0,
                 'numerical_accuracy_within_5pct': 0,
-                'numerical_accuracy_within_10pct': 0,
-                'retrieval_precision_avg': 0,
-                'retrieval_recall_avg': 0,
-                'retrieval_f1_score_avg': 0,
-                'retrieval_mrr_avg': 0,
-                'retrieval_ndcg_avg': 0,
+                'precision_avg': 0,
+                'recall_avg': 0,
+                'f1_score_avg': 0,
                 'average_latency': 0
             },
             'detailed_results': []
@@ -429,16 +342,39 @@ class FinancialQAEvaluator:
             start_time = time.time()
             retrieved_docs = self.multi_stage_retriever.get_relevant_documents(expanded_query)
             
-            # Generate response
+            # First chain: Get detailed reasoning
             try:
-                full_response = self.qa_chain.invoke(expanded_query)
-                # Extract content from the response object if needed
-                if hasattr(full_response, 'content'):
-                    full_response = full_response.content
-                elif isinstance(full_response, dict) and 'result' in full_response:
-                    full_response = full_response['result']
+                reasoning_result = self.reasoning_chain.invoke(expanded_query)
+                if hasattr(reasoning_result, 'content'):
+                    reasoning_text = reasoning_result.content
+                elif isinstance(reasoning_result, dict) and 'result' in reasoning_result:
+                    reasoning_text = reasoning_result['result']
+                else:
+                    reasoning_text = str(reasoning_result)
+                
+                # Second chain: Extract precise answer
+                extraction_chain = self.extraction_prompt | self.llm
+                
+                # Get precise answer using the reasoning text as context
+                extraction_result = extraction_chain.invoke({
+                    "context": reasoning_text,
+                    "question": query
+                })
+                
+                if hasattr(extraction_result, 'content'):
+                    full_response = extraction_result.content
+                elif isinstance(extraction_result, dict) and 'result' in extraction_result:
+                    full_response = extraction_result['result']
+                else:
+                    full_response = str(extraction_result)
+                
+                # Clean up the result by removing "FINAL ANSWER:" prefix if present
+                full_response = full_response.strip()
+                if full_response.startswith('FINAL ANSWER:'):
+                    full_response = full_response[len('FINAL ANSWER:'):].strip()
+                
             except Exception as e:
-                logger.error(f"Error generating response: {e}")
+                logger.error(f"Error in chain execution: {e}")
                 full_response = "Error generating response"
             
             end_time = time.time()
@@ -447,67 +383,70 @@ class FinancialQAEvaluator:
             latency = end_time - start_time
             total_latency += latency
             
-            # Extract numerical answers
-            response_num = self.extract_final_numerical_answer(full_response, ground_truth)
-            ground_truth_num = self.extract_final_numerical_answer(ground_truth)
+            # Extract and compare answers
+            response_answer = self.extract_answer(full_response)
+            comparison_result = self.compare_answers(response_answer, ground_truth)
             
-            # Numerical accuracy
-            numerical_comparison = self.compare_numerical_answers(response_num, ground_truth_num)
-            numerical_accuracy = numerical_comparison['is_match']
+            # Calculate metrics based on answer type
+            is_match = comparison_result['is_match']
             
-            # Calculate additional numerical accuracy metrics
-            numerical_accuracy_with_sign = False
-            numerical_accuracy_within_1pct = False
-            numerical_accuracy_within_5pct = False
-            numerical_accuracy_within_10pct = False
-            
-            if response_num is not None and ground_truth_num is not None:
+            # Track answer type counts and accuracy
+            if response_answer['type'] == 'boolean':
+                results['metrics']['total_boolean'] += 1
+                if is_match:
+                    results['metrics']['boolean_accuracy'] += 1
+            elif response_answer['type'] == 'number' and comparison_result['ground_truth']['type'] == 'number':
+                results['metrics']['total_numerical'] += 1
+                if is_match:
+                    results['metrics']['numerical_accuracy'] += 1
+                
+                # Calculate additional numerical metrics
+                response_num = response_answer['value']
+                ground_truth_num = comparison_result['ground_truth']['value']
+                
                 # Check if signs match
                 signs_match = (response_num >= 0 and ground_truth_num >= 0) or (response_num < 0 and ground_truth_num < 0)
+                numerical_accuracy_with_sign = signs_match
                 
                 # Calculate relative difference for percentage-based metrics
                 if ground_truth_num != 0:
                     rel_diff = abs(response_num - ground_truth_num) / abs(ground_truth_num)
-                    numerical_accuracy_with_sign = signs_match
                     numerical_accuracy_within_1pct = rel_diff <= 0.01
                     numerical_accuracy_within_5pct = rel_diff <= 0.05
-                    numerical_accuracy_within_10pct = rel_diff <= 0.1
             
-            # Calculate retrieval metrics
-            retrieval_metrics = self.calculate_retrieval_metrics(retrieved_docs, document_id)
+            # Calculate precision, recall, and F1 based on match
+            precision = 1.0 if is_match else 0.0
+            recall = 1.0 if is_match else 0.0
+            f1_score = 1.0 if is_match else 0.0
             
-            # Store detailed result including the full model response
+            # Store detailed result
             result_entry = {
                 'query': query,
                 'ground_truth': ground_truth,
-                'ground_truth_num': ground_truth_num,
-                'full_response': full_response,  # Include the full model response
-                'response_num': response_num,
-                'numerical_accuracy': numerical_accuracy,
-                'numerical_comparison': numerical_comparison,
+                'full_response': full_response,
+                'response': response_answer,
+                'comparison': comparison_result,
+                'numerical_accuracy': is_match,
                 'numerical_accuracy_with_sign': numerical_accuracy_with_sign,
                 'numerical_accuracy_within_1pct': numerical_accuracy_within_1pct,
                 'numerical_accuracy_within_5pct': numerical_accuracy_within_5pct,
-                'numerical_accuracy_within_10pct': numerical_accuracy_within_10pct,
-                'retrieval_metrics': retrieval_metrics,
+                'precision': precision,
+                'recall': recall,
+                'f1_score': f1_score,
                 'latency': latency
             }
             results['detailed_results'].append(result_entry)
             
             # Update aggregate metrics
-            results['metrics']['numerical_accuracy'] += numerical_accuracy
             results['metrics']['numerical_accuracy_with_sign'] += numerical_accuracy_with_sign
             results['metrics']['numerical_accuracy_within_1pct'] += numerical_accuracy_within_1pct
             results['metrics']['numerical_accuracy_within_5pct'] += numerical_accuracy_within_5pct
-            results['metrics']['numerical_accuracy_within_10pct'] += numerical_accuracy_within_10pct
-            results['metrics']['retrieval_precision_avg'] += retrieval_metrics['precision']
-            results['metrics']['retrieval_recall_avg'] += retrieval_metrics['recall']
-            results['metrics']['retrieval_f1_score_avg'] += retrieval_metrics['f1_score']
-            results['metrics']['retrieval_mrr_avg'] += retrieval_metrics['mrr']
-            results['metrics']['retrieval_ndcg_avg'] += retrieval_metrics['ndcg']
+            results['metrics']['precision_avg'] += precision
+            results['metrics']['recall_avg'] += recall
+            results['metrics']['f1_score_avg'] += f1_score
             
             # Log brief summary of each evaluation
-            logger.debug(f"Query: '{query[:50]}...' - Ground truth: {ground_truth_num} - Response: {response_num} - Match: {numerical_accuracy}")
+            logger.debug(f"Query: '{query[:50]}...' - Type: {response_answer['type']} - Ground truth: {ground_truth} - Response: {response_answer['value']} - Match: {is_match}")
             
             # Update progress bar
             pbar.update(1)
@@ -517,13 +456,26 @@ class FinancialQAEvaluator:
         
         # Compute final metrics
         total_samples = len(self.qa_pairs)
-        for metric in results['metrics']:
-            if metric != 'average_latency':
-                results['metrics'][metric] /= total_samples
+        
+        # Calculate accuracy percentages
+        if results['metrics']['total_numerical'] > 0:
+            results['metrics']['numerical_accuracy'] /= results['metrics']['total_numerical']
+            results['metrics']['numerical_accuracy_with_sign'] /= results['metrics']['total_numerical']
+            results['metrics']['numerical_accuracy_within_1pct'] /= results['metrics']['total_numerical']
+            results['metrics']['numerical_accuracy_within_5pct'] /= results['metrics']['total_numerical']
+        
+        if results['metrics']['total_boolean'] > 0:
+            results['metrics']['boolean_accuracy'] /= results['metrics']['total_boolean']
+        
+        # Calculate other metrics
+        for metric in ['precision_avg', 'recall_avg', 'f1_score_avg']:
+            results['metrics'][metric] /= total_samples
         
         results['metrics']['average_latency'] = total_latency / total_samples
         
-        logger.info(f"Evaluation completed. Numerical accuracy: {results['metrics']['numerical_accuracy']:.2%}")
+        logger.info(f"Evaluation completed.")
+        logger.info(f"Numerical Questions: {results['metrics']['total_numerical']}, Accuracy: {results['metrics']['numerical_accuracy']:.2%}")
+        logger.info(f"Boolean Questions: {results['metrics']['total_boolean']}, Accuracy: {results['metrics']['boolean_accuracy']:.2%}")
         
         return results
 
@@ -551,19 +503,29 @@ class FinancialQAEvaluator:
         logger.info(f"Total Samples: {results['total_samples']}")
         logger.info("\nAggregate Metrics:")
         for metric, value in results['metrics'].items():
+            metric_name = metric.replace('_', ' ').title()
             if metric == 'average_latency':
-                logger.info(f"{metric.replace('_', ' ').title()}: {value:.2f} seconds")
+                logger.info(f"{metric_name}: {value:.2f} seconds")
+            elif metric in ['total_numerical', 'total_boolean']:
+                logger.info(f"{metric_name}: {int(value)}")
+            elif metric.startswith(('numerical_', 'boolean_', 'precision_', 'recall_', 'f1_')):
+                logger.info(f"{metric_name}: {value * 100:.2f}%")
             else:
-                logger.info(f"{metric.replace('_', ' ').title()}: {value * 100:.2f}%")
+                logger.info(f"{metric_name}: {value}")
         
         # Log a few example results
         if results['detailed_results']:
             logger.info("\nExample Query Result:")
             example = results['detailed_results'][0]
             logger.info(f"Query: {example['query']}")
-            logger.info(f"Ground Truth: {example['ground_truth']} ({example['ground_truth_num']})")
-            logger.info(f"Response Number: {example['response_num']}")
-            logger.info(f"Match: {example['numerical_accuracy']} ({example['numerical_comparison']['reason']})")
+            logger.info(f"Ground Truth: {example['ground_truth']}")
+            # Add % sign if ground truth has it
+            response_value = example['response']['value']
+            if '%' in example['ground_truth']:
+                response_value = f"{response_value}%"
+            logger.info(f"Response: {response_value}")
+            logger.info(f"Answer Type: {example['response']['type']}")
+            logger.info(f"Match: {example['numerical_accuracy']} ({example['comparison']['reason']})")
         
         logger.info(f"\nDetailed report saved to {report_path}")
 
@@ -574,7 +536,7 @@ def main():
     # Initialize evaluator
     evaluator = FinancialQAEvaluator(
         dataset_path=dataset_path, 
-        model_name="o3-mini", 
+        model_name="gpt-4o-mini", 
         top_k=10, 
         sample_size=5  # Evaluate on first 5 samples
     )

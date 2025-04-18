@@ -351,7 +351,7 @@ class AdvancedTableParser:
 class QueryExpander:
     """Expands queries to improve retrieval performance"""
     
-    def __init__(self, model_name: str = "o3-mini"):
+    def __init__(self, model_name: str = "gpt-4o-mini"):
         """Initialize with specified model"""
         self.llm = ChatOpenAI(model=model_name)
     

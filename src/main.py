@@ -355,8 +355,8 @@ def setup_pinecone_vectorstore(documents: List[Document], ingest_flag=False) -> 
     return vectorstore
 
 
-def create_enhanced_numerical_prompt_template() -> ChatPromptTemplate:
-    """Create an enhanced prompt template for numerical reasoning based on FinanceRAG methodology"""
+def create_reasoning_prompt_template() -> ChatPromptTemplate:
+    """Create a prompt template for detailed financial reasoning"""
     template = """You are a precise financial analyst specializing in numerical reasoning with financial documents.
     
 CONTEXT INFORMATION:
@@ -377,17 +377,46 @@ CRITICAL INSTRUCTIONS:
 - If any calculation is uncertain, explain why and provide the most likely answer
 - For percentage changes, use the formula: ((new_value - old_value) / old_value) * 100
 - For financial ratios, clearly state the formula used
-
-FINAL ANSWER FORMAT:
-After your detailed reasoning, you MUST end your response with a line that says "FINAL ANSWER:" followed by ONLY the numerical result (with or without % 'if appropriate). 
-For example: "FINAL ANSWER: 42.5%" or "FINAL ANSWER: -21.1%" or "FINAL ANSWER: 1000000"
-The out put should not have millions or billions or currency appended to the answer FINAL ANSWER:, just the number.
-For example bad answers are "FINAL ANSWER: $1,000,000" or "FINAL ANSWER: 1 million" or "FINAL ANSWER: 1 billion"
-Be sure to include the negative sign (-) for negative percentages or values.
-Do not include any additional text, explanations, or context after the FINAL ANSWER line.
-This format is critical for automated evaluation.
-
 """
+    return ChatPromptTemplate.from_template(template)
+
+def create_answer_extraction_prompt_template() -> ChatPromptTemplate:
+    """Create a prompt template for extracting precise numerical answers or yes/no responses"""
+    template = """Based on the following calculation and reasoning, extract the precise answer.
+
+CALCULATION CONTEXT:
+{context}
+
+ORIGINAL QUESTION: {question}
+
+First, analyze the question type:
+1. If it contains words like "increase", "decrease", "change", "growth", "difference", or similar terms:
+   - This ALWAYS requires a PERCENTAGE answer
+   - Look for the percentage calculation in the context (usually includes '× 100%')
+   - Use the EXACT percentage value from the calculation
+
+2. If it's a yes/no question (e.g., "Did the value increase?", "Was there a decrease?"):
+   - Answer with ONLY "yes" or "no" in lowercase
+
+3. If it asks for a specific amount or value:
+   - Use the EXACT number from the calculation
+   - Do not include currency symbols or units
+
+CRITICAL RULES:
+1. Questions about changes or differences MUST be answered with percentages:
+   - "by how much did X increase?" → use the exact percentage
+   - "what was the change in X?" → use the exact percentage
+   - "how much did X grow?" → use the exact percentage
+
+2. Format rules:
+   - Use the EXACT numbers from your calculations
+   - Do not modify decimal places or add trailing zeros
+   - Keep the negative sign (-) if present
+   - For yes/no, use lowercase "yes" or "no"
+
+Look at the calculations in the context and use the EXACT value.
+
+FINAL ANSWER:"""
     
     return ChatPromptTemplate.from_template(template)
 
@@ -425,10 +454,11 @@ def main():
     advanced_table_parser = AdvancedTableParser()
     processed_docs = advanced_table_parser.process_documents(split_docs)
     
-    # Set up vector store
+    # Set up vector store 
+    ingest_flag = False  # Set to True if you want to ingest data into Pinecone
     print("Setting up vector store...")
     try:
-        vectorstore = setup_pinecone_vectorstore(processed_docs, ingest_flag=True)
+        vectorstore = setup_pinecone_vectorstore(processed_docs, ingest_flag=ingest_flag)
         print("Successfully set up Pinecone vector store")
     except Exception as e:
         print(f"Error setting up Pinecone: {e}")
@@ -465,25 +495,18 @@ def main():
     
     # Initialize query expander
     print("Initializing query expander...")
-    query_expander = QueryExpander(model_name="o3-mini")
+    query_expander = QueryExpander(model_name="gpt-4o-mini")
     
     # Set up LLM
     llm = ChatOpenAI(
-        model_name="o3-mini",  # Using the o3-mini model as requested
+        model_name="gpt-4o-mini", 
         streaming=True,
         callbacks=[StreamingStdOutCallbackHandler()]
     )
     
-    # Create enhanced prompt template
-    prompt = create_enhanced_numerical_prompt_template()
-    
-    # Create QA chain with base retriever
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=base_retriever,
-        chain_type_kwargs={"prompt": prompt}
-    )
+    # Initialize the chains with their respective prompts
+    reasoning_prompt = create_reasoning_prompt_template()
+    extraction_prompt = create_answer_extraction_prompt_template()
     
     # Create advanced calculator tool
     calculator = AdvancedCalculatorTool()
@@ -506,25 +529,54 @@ def main():
         # # Get documents using the expanded query
         # retrieved_docs = multi_stage_retriever.invoke(expanded_query)
         
-        # Run the query with expanded query
-        full_result = qa_chain.invoke(expanded_query)
-        # Extract content from the response object if needed
-        if hasattr(full_result, 'content'):
-            full_result = full_result.content
-        elif isinstance(full_result, dict) and 'result' in full_result:
-            full_result = full_result['result']
+        # First chain: Get detailed reasoning
+        reasoning_prompt = create_reasoning_prompt_template()
+        reasoning_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=base_retriever,
+            chain_type_kwargs={"prompt": reasoning_prompt}
+        )
         
-        # Extract just the numerical answer
-        final_answer_match = re.search(r'FINAL ANSWER:\s*([-+]?[\$]?[\d,]*\.?\d+(?:[eE][-+]?\d+)?%?)', full_result)
-        
-        if final_answer_match:
-            result = final_answer_match.group(1)
-            # Clean up the result for evaluation
-            if result.endswith('%') and not result.startswith('-') and expected_answer and expected_answer.startswith('-'):
-                # Handle case where expected answer is negative percentage but extracted answer is positive
-                result = '-' + result
+        # Get detailed reasoning
+        reasoning_result = reasoning_chain.invoke(expanded_query)
+        if hasattr(reasoning_result, 'content'):
+            reasoning_text = reasoning_result.content
+        elif isinstance(reasoning_result, dict) and 'result' in reasoning_result:
+            reasoning_text = reasoning_result['result']
         else:
-            result = full_result
+            reasoning_text = str(reasoning_result)
+        
+        # Second chain: Extract precise answer
+        extraction_prompt = create_answer_extraction_prompt_template()
+        
+        # Create a direct chain for answer extraction
+        extraction_chain = extraction_prompt | llm
+        
+        # Get precise answer using the reasoning text as context
+        extraction_result = extraction_chain.invoke({
+            "context": reasoning_text,
+            "question": query
+        })
+        if hasattr(extraction_result, 'content'):
+            result_text = extraction_result.content
+        elif isinstance(extraction_result, dict) and 'result' in extraction_result:
+            result_text = extraction_result['result']
+        else:
+            result_text = str(extraction_result)
+        
+        # Use the result directly from the LLM without reformatting
+        if hasattr(extraction_result, 'content'):
+            result = extraction_result.content
+        elif isinstance(extraction_result, dict) and 'result' in extraction_result:
+            result = extraction_result['result']
+        else:
+            result = str(extraction_result)
+            
+        # Clean up the result by removing "FINAL ANSWER:" prefix if present
+        result = result.strip()
+        if result.startswith('FINAL ANSWER:'):
+            result = result[len('FINAL ANSWER:'):].strip()
         
         # Validate the result
         validation = validator.validate(query, result)
