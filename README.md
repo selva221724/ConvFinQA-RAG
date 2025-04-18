@@ -136,7 +136,7 @@ streamlit run app/dashboard.py  # Launch dashboard
 
 ## Performance Analysis
 
-### Current Metrics (Dev Set)
+### Current Metrics (train.json Set) (trust me it was working better with dev.json 😔 )
 - Numerical Accuracy: 75.00%
 - Within 1% Accuracy: 75.00%
 - Within 5% Accuracy: 75.00%
@@ -194,7 +194,7 @@ Started this project with a mix of excitement and "what did I get myself into?" 
 Over four days (about 2 hours each day between coffee breaks), here's how it went down:
 
 **Day 1: The "What Am I Looking At?" Phase 🤔**
-I spent the first day just wrapping my head around financial data. Coming from conversational text, this was a whole different beast. Tables everywhere, numbers that needed to make sense, and percentages that had to be calculated just right. Started with dev.json because, well, baby steps!
+I spent the first day just wrapping my head around financial data. Coming from general text RAG builder background, this was a whole different beast. Tables everywhere, numbers that needed to make sense, and percentages that had to be calculated just right. Started with dev.json because, well, baby steps!
 
 **Day 2: The "Now We're Cooking!" Phase 🛠️**
 Decided to go with Pinecone for the vector DB - didn't want to waste time setting up local alternatives. Grabbed OpenAI's endpoints because they're reliable and cost-effective. First RAG pipeline was... let's say "numerically challenged" 😅 But after some custom table parsing and chunking magic, things started looking up.
