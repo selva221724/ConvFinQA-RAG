@@ -285,7 +285,7 @@ def main():
     # Set up vector store
     print("Setting up vector store...")
     try:
-        vectorstore = setup_pinecone_vectorstore(processed_docs, ingest_flag=False)
+        vectorstore = setup_pinecone_vectorstore(processed_docs, ingest_flag=True)
         print("Successfully set up Pinecone vector store")
     except Exception as e:
         print(f"Error setting up Pinecone: {e}")

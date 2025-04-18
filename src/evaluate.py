@@ -370,7 +370,7 @@ class FinancialQAEvaluator:
 
 def main():
     dataset_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'train.json')
-    evaluator = FinancialQAEvaluator(dataset_path=dataset_path, model_name="gpt-4o-mini", top_k=10, sample_size=5)
+    evaluator = FinancialQAEvaluator(dataset_path=dataset_path, model_name="gpt-4o-mini", top_k=10, sample_size=1500)
     results = evaluator.evaluate()
     evaluator.generate_report(results)
 
