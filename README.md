@@ -187,14 +187,14 @@ streamlit run app/dashboard.py  # Launch dashboard
 
 ## My RAG Journey 🚀
 
-Hey there! Let me tell you about my journey building this financial QA system. Coming from a background in conversational AI, this was my first dive into financial data, and what a learning experience it was!
+Hey there! Let me tell you about my journey building this financial QA system. Coming from a background in general text RAG builder, this was my first dive into financial data, and what a learning experience it was!
 
 Started this project with a mix of excitement and "what did I get myself into?" feeling. Financial data? Tables? Numerical reasoning? Yeah, that was going to be interesting! But hey, challenges are what make us grow, right?
 
 Over four days (about 2 hours each day between coffee breaks), here's how it went down:
 
 **Day 1: The "What Am I Looking At?" Phase 🤔**
-I spent the first day just wrapping my head around financial data. Coming from general text RAG builder background, this was a whole different beast. Tables everywhere, numbers that needed to make sense, and percentages that had to be calculated just right. Started with dev.json because, well, baby steps!
+I spent the first day just wrapping my head around financial data. Tables everywhere, numbers that needed to make sense, and percentages that had to be calculated just right. Started with dev.json because, well, baby steps! Did some EDA dashboard to understand the data. 
 
 **Day 2: The "Now We're Cooking!" Phase 🛠️**
 Decided to go with Pinecone for the vector DB - didn't want to waste time setting up local alternatives. Grabbed OpenAI's endpoints because they're reliable and cost-effective. First RAG pipeline was... let's say "numerically challenged" 😅 But after some custom table parsing and chunking magic, things started looking up.
@@ -258,7 +258,7 @@ The project includes a Streamlit dashboard (`app/dashboard.py`) that provides ED
 Looking back, there's so much more I wanted to do! Here's what I'd tackle with more time:
 
 **Better Model Performance:**
-I'd love to experiment with GPT-4 and really fine-tune those numerical capabilities. The current model sometimes struggles with complex calculations - would be great to make it more reliable. Also, that reranking feature? Yeah, it needs some love to work properly.
+I'd love to experiment with GPT-4 and really fine-tune those numerical capabilities. The current model sometimes struggles with complex calculations - would be great to make it more reliable. Also, that reranking feature? Yeah, it needs some love to work properly, When the vector database becomes extensive, retrieving the correct context becomes challenging.
 
 **Proper Production Setup:**
 Right now it's more of a prototype, but with time I'd set up a proper CI/CD pipeline with GitHub Actions. Imagine automatic testing, deployment to AWS or Azure, maybe even a nice Kubernetes setup if it's part of a bigger system. Would make updates and scaling so much smoother!
