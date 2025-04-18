@@ -15,10 +15,9 @@ langchain-community
 pinecone
 openai
 python-dotenv
-numpy<2.0  # Specify NumPy version below 2.0 to avoid compatibility issues
 tiktoken
 faiss-cpu
-langchain-pinecone 
+langchain-pinecone
 pinecone-notebooks
 torch
-bs4
+beautifulsoup4
