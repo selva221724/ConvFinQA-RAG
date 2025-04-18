@@ -207,7 +207,10 @@ Evaluation day! Considered going with ROUGE/BLEU but realized they're not great 
 
 I owe a huge shout-out to my AI sidekick, Claude Sonnet 3.7, for assisting me build the repo and debug like a pro! If you find any bugs or errors in my code, just remember: it's all Claude's fault! 😂 , Just kidding, I had my hands on most of core places and cleaned it up finally, Because most of the time, it couldn't understand the numerical reasoning part, vector db ingestion was poor, conflicting packages and dataset part, it was like a fight in a time loop! But seriously, any mistakes are mine—Claude just provided the caffeine! ☕️
 
-![Python](https://img.shields.io/badge/python-3.11-blue.svg)
+At 4 AM, my wife was: 
+
+![31af758d-5fb8-4632-97d3-767243bb6ca9_text](https://github.com/user-attachments/assets/34aa8c14-499e-43f2-8d6b-c589e18f4464)
+
 
 ### Development Decisions
 
