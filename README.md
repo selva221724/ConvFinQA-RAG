@@ -189,18 +189,16 @@ streamlit run app/dashboard.py  # Launch dashboard
 
 Hey there! Let me tell you about my journey building this financial QA system. Coming from a background in general text RAG builder, this was my first dive into financial data, and what a learning experience it was!
 
-Started this project with a mix of excitement and "what did I get myself into?" feeling. Financial data? Tables? Numerical reasoning? Yeah, that was going to be interesting! But hey, challenges are what make us grow, right?
-
 Over four days (about 2 hours each day between coffee breaks), here's how it went down:
 
 **Day 1: The "What Am I Looking At?" Phase 🤔**
-I spent the first day just wrapping my head around financial data. Tables everywhere, numbers that needed to make sense, and percentages that had to be calculated just right. Started with dev.json because, well, baby steps! Did some EDA dashboard to understand the data. 
+I spent the first day just wrapping my head around financial data. Tables everywhere, numbers that needed to make sense, and percentages that had to be calculated just right. Started with `dev.json` because, well, baby steps! Did some EDA dashboard to understand the data. 
 
 **Day 2: The "Now We're Cooking!" Phase 🛠️**
 Decided to go with Pinecone for the vector DB - didn't want to waste time setting up local alternatives. Grabbed OpenAI's endpoints because they're reliable and cost-effective. First RAG pipeline was... let's say "numerically challenged" 😅 But after some custom table parsing and chunking magic, things started looking up.
 
 **Day 3: The "Making It Smart" Phase 💡**
-This is where the fun began! Added query expansion (because context is everything), implemented two-stage answer generation (like a math teacher: show your work, then give the answer), and made sure our tables didn't turn into spaghetti. The vector DB started actually understanding what numbers meant! 
+Added query expansion (because context is everything), implemented two-stage answer generation, and made sure our tables didn't turn into spaghetti. The vector DB started actually understanding what numbers meant! It was a good to see the cleaned date loaded to the DB. 
 
 **Day 4: The "Truth Time" Phase 📊**
 Evaluation day! Considered going with ROUGE/BLEU but realized they're not great for numbers. Went with MAE/RMSE instead - because when you're dealing with percentages, being off by 0.1 or 10 makes a huge difference! Added all the logging because, well, debugging financial calculations is fun (said no one ever).
